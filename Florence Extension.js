@@ -18844,6 +18844,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         lastScannedUrl: '',
         pendingUrl: '',
         stableCancel: null,
+        retryTimer: null,
+        retryUrl: '',
+        retryCompletedUrl: '',
         modalObserver: null,
         modalAutofillTimer: null,
         latestLog: null,
@@ -19877,6 +19880,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         removeSidebarOffset();
         florenceTlogDetachUrlListeners();
         florenceTlogDetachModalObserver();
+        florenceTlogClearRetryScan();
         if (trainingLogState.stableCancel) {
             trainingLogState.stableCancel();
             trainingLogState.stableCancel = null;
@@ -22218,6 +22222,33 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function florenceTlogClearRetryScan() {
+        if (trainingLogState.retryTimer) {
+            clearTimeout(trainingLogState.retryTimer);
+            trainingLogState.retryTimer = null;
+        }
+        trainingLogState.retryUrl = '';
+    }
+
+    function florenceTlogScheduleRetryScan(url) {
+        if (!trainingLogState.active || !url) return;
+        if (trainingLogState.retryCompletedUrl === url) return;
+        florenceTlogClearRetryScan();
+        trainingLogState.retryUrl = url;
+        trainingLogState.retryTimer = setTimeout(function() {
+            trainingLogState.retryTimer = null;
+            var retryUrl = trainingLogState.retryUrl;
+            trainingLogState.retryUrl = '';
+            if (!trainingLogState.active) return;
+            if (retryUrl !== location.href) return;
+            if (trainingLogState.scanning) return;
+            trainingLogState.retryCompletedUrl = retryUrl;
+            addLogMessage('Training Log: running delayed retry scan for ' + retryUrl, 'log');
+            florenceTlogRunScan();
+        }, 8000);
+        addLogMessage('Training Log: scheduled delayed retry scan for ' + url, 'log');
+    }
+
     function florenceTlogWaitForPageStable(callback) {
         var stableMs = 500;
         var timeoutMs = 5000;
@@ -22263,6 +22294,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
             trainingLogState.stableCancel();
             trainingLogState.stableCancel = null;
         }
+        if (trainingLogState.pendingUrl !== location.href) {
+            florenceTlogClearRetryScan();
+            trainingLogState.retryCompletedUrl = '';
+        }
         trainingLogState.pendingUrl = location.href;
         if (trainingLogState.lastScannedUrl === location.href) return;
         setTlogStatus('scanning', 'Scanning...');
@@ -22274,6 +22309,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (trainingLogState.scanning) return;
             trainingLogState.lastScannedUrl = location.href;
             florenceTlogRunScan();
+            florenceTlogScheduleRetryScan(location.href);
         });
     }
 
@@ -22318,6 +22354,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 trainingLogState.stableCancel();
                 trainingLogState.stableCancel = null;
             }
+            florenceTlogClearRetryScan();
             trainingLogState.pendingUrl = '';
             setTlogStatus('empty', 'Scanning paused');
         }
@@ -22570,8 +22607,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
         refreshBtn.onclick = function() {
             trainingLogState.scanning = false;
             trainingLogState.legendWaiting = false;
+            trainingLogState.retryCompletedUrl = '';
+            florenceTlogClearRetryScan();
             setTlogStatus('scanning', 'Scanning...');
             florenceTlogRunScan();
+            florenceTlogScheduleRetryScan(location.href);
         };
 
         var configureBtn = document.createElement('button');
