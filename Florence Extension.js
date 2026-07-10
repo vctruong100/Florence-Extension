@@ -622,16 +622,9 @@
         confirmButton.onmouseout = function() { if (!confirmButton.disabled) { confirmButton.style.background = '#22c55e'; confirmButton.style.borderColor = '#22c55e'; } };
         confirmButton.onclick = function() {
             addLogMessage('showELogInputPanel: Confirm clicked', 'log');
-            const parsed = parseNamesInput(textarea.value);
-            if (parsed.length === 0) { addLogMessage('showELogInputPanel: no valid names parsed', 'warn'); return; }
-            elogState.parsedNames = parsed;
-            addLogMessage('showELogInputPanel: parsed ' + parsed.length + ' unique names', 'log');
-            if (modal.parentNode) { document.body.removeChild(modal); }
-            elogState.isRunning = true;
-            elogState.timer = createFeatureTimer('elog');
-            elogState.timer.start();
-            showCollectingDataPanel('elog', 'Add Training Log Staff Entries');
-            startELogScan();
+            if (runELogStaffEntriesFromText(textarea.value, elogState.focusReturnElement, 'ELog modal')) {
+                if (modal.parentNode) { document.body.removeChild(modal); }
+            }
         };
         const clearButton = document.createElement('button');
         clearButton.textContent = 'Clear All';
@@ -692,6 +685,31 @@
         }
         addLogMessage('parseNamesInput: parsed ' + results.length + ' unique names', 'log');
         return results;
+    }
+
+    function runELogStaffEntriesFromText(input, focusReturnElement, sourceLabel) {
+        addLogMessage('runELogStaffEntriesFromText: starting from ' + (sourceLabel || 'unknown'), 'log');
+        resetELogState();
+        elogState.focusReturnElement = focusReturnElement || document.getElementById('elog-staff-entries-btn');
+        elogState.abortController = new AbortController();
+        const parsed = parseNamesInput(input);
+        if (parsed.length === 0) {
+            addLogMessage('runELogStaffEntriesFromText: no valid names parsed', 'warn');
+            return false;
+        }
+        const mainTable = document.querySelector(ELOG_SELECTORS.mainTable);
+        if (!mainTable) {
+            addLogMessage('runELogStaffEntriesFromText: main table not found', 'warn');
+            showELogWarning();
+            return false;
+        }
+        elogState.parsedNames = parsed;
+        elogState.isRunning = true;
+        elogState.timer = createFeatureTimer('elog');
+        elogState.timer.start();
+        showCollectingDataPanel('elog', 'Add Training Log Staff Entries');
+        startELogScan();
+        return true;
     }
 
     function elogNormalizeName(name) {
@@ -18801,6 +18819,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     const TLOG_TAB_STORAGE_KEY = 'florence_selected_tab';
     const TLOG_ACTIVE_STORAGE_KEY = 'florence_training_log_active';
+    const TLOG_STAFF_PIS_STORAGE_KEY = 'florence_training_log_staff_pis_v1';
+    const TLOG_STAFF_NON_PI_SESSION_KEY = 'florence_training_log_staff_non_pi_session_v1';
     const STUDY_LIBRARY_STORAGE_KEY = 'florence_study_library_v1';
     const STUDY_LIBRARY_DATA_VERSION = 1;
     const TLOG_LATEST_STORAGE_KEY = 'florence_latest_training_log_v1';
@@ -18829,7 +18849,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
         latestLog: null,
         selectedTab: 'buttons',
         legendWaiting: false,
-        persisted: JSON.parse(JSON.stringify(TLOG_PERSISTENCE_DEFAULT))
+        persisted: JSON.parse(JSON.stringify(TLOG_PERSISTENCE_DEFAULT)),
+        staffList: {
+            pis: [],
+            selectedPi: '',
+            nonPiText: ''
+        }
     };
 
     let studyLibraryState = {
@@ -20184,6 +20209,63 @@ function showResponsibilitiesProgressPanel(rolesData) {
         });
     }
 
+    function normalizeTrainingLogStaffListState(data) {
+        var normalized = { pis: [], selectedPi: '', nonPiText: '' };
+        if (data && typeof data === 'object') {
+            if (Array.isArray(data.pis)) {
+                var seen = new Set();
+                for (var i = 0; i < data.pis.length; i++) {
+                    var name = String(data.pis[i] || '').replace(/\s+/g, ' ').trim();
+                    var key = elogNormalizeName(name);
+                    if (!name || !key || seen.has(key)) continue;
+                    seen.add(key);
+                    normalized.pis.push(name);
+                }
+            }
+            normalized.selectedPi = String(data.selectedPi || '').replace(/\s+/g, ' ').trim();
+        }
+        try {
+            normalized.nonPiText = sessionStorage.getItem(TLOG_STAFF_NON_PI_SESSION_KEY) || '';
+        } catch (e) {
+            normalized.nonPiText = '';
+        }
+        if (normalized.selectedPi && normalized.pis.indexOf(normalized.selectedPi) === -1) {
+            normalized.selectedPi = '';
+        }
+        return normalized;
+    }
+
+    function loadTrainingLogStaffListState() {
+        return florenceStorageGet(TLOG_STAFF_PIS_STORAGE_KEY).then(function(result) {
+            trainingLogState.staffList = normalizeTrainingLogStaffListState(result ? result[TLOG_STAFF_PIS_STORAGE_KEY] : null);
+        }).catch(function(e) {
+            addLogMessage('loadTrainingLogStaffListState: failed: ' + e, 'error');
+            trainingLogState.staffList = normalizeTrainingLogStaffListState(null);
+        });
+    }
+
+    function saveTrainingLogStaffListPis() {
+        var payload = {};
+        payload[TLOG_STAFF_PIS_STORAGE_KEY] = {
+            pis: trainingLogState.staffList.pis.slice(),
+            selectedPi: trainingLogState.staffList.selectedPi || ''
+        };
+        return florenceStorageSet(payload).catch(function(e) {
+            addLogMessage('saveTrainingLogStaffListPis: failed: ' + e, 'error');
+            florenceShowStorageError('PI list save failed: ' + e.message);
+            throw e;
+        });
+    }
+
+    function saveTrainingLogStaffListNonPi(text) {
+        trainingLogState.staffList.nonPiText = String(text || '');
+        try {
+            sessionStorage.setItem(TLOG_STAFF_NON_PI_SESSION_KEY, trainingLogState.staffList.nonPiText);
+        } catch (e) {
+            addLogMessage('saveTrainingLogStaffListNonPi: failed: ' + e, 'error');
+        }
+    }
+
     function migrateStudy(study) {
         if (!study) return study;
         var defaults = {
@@ -20254,7 +20336,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function loadTrainingLogPersistedState() {
-        return Promise.all([loadTrainingLogTab(), loadTrainingLogActive(), loadStudyLibrary()]);
+        return Promise.all([loadTrainingLogTab(), loadTrainingLogActive(), loadTrainingLogStaffListState(), loadStudyLibrary()]);
     }
 
     function loadLatestTrainingLogPersisted() {
@@ -20424,6 +20506,121 @@ function showResponsibilitiesProgressPanel(rolesData) {
         });
     }
 
+    function extractLegendTextFromHtml(html) {
+        if (!html) return null;
+        try {
+            var parser = new DOMParser();
+            var doc = parser.parseFromString(html, 'text/html');
+            var legendEl = doc.querySelector('.document-log-content__legend, .test-logLegend');
+            if (legendEl) {
+                return extractLegendText(legendEl);
+            }
+            var headings = doc.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b, label, div, span');
+            for (var i = 0; i < headings.length; i++) {
+                var headingText = normalizeTlogModalText(headings[i].textContent);
+                if (!/^legend:?$/i.test(headingText)) continue;
+                var container = headings[i].parentElement;
+                if (!container) continue;
+                var text = extractLegendText(container);
+                if (text) return text;
+            }
+        } catch (e) {
+            addLogMessage('Training Log: failed to parse fetched legend HTML: ' + e, 'error');
+        }
+        return null;
+    }
+
+    function resolveTrainingLogHref(href) {
+        if (!href) return '';
+        try {
+            return new URL(href, window.location.href).href;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function fetchLegendFromTrainingLog(log) {
+        if (!log || !log.href) return Promise.resolve(false);
+        var url = resolveTrainingLogHref(log.href);
+        if (!url) return Promise.resolve(false);
+        addLogMessage('Training Log: fetching latest log for legend: ' + url, 'log');
+        return fetch(url, { credentials: 'include' })
+            .then(function(resp) {
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                return resp.text();
+            })
+            .then(function(html) {
+                var legendText = extractLegendTextFromHtml(html);
+                if (!legendText) {
+                    addLogMessage('Training Log: no legend found in fetched latest log', 'log');
+                    return loadLegendFromHiddenTrainingLogFrame(url);
+                }
+                savePersistedLegend(legendText);
+                addLogMessage('Training Log: legend pulled from latest log in background', 'log');
+                return true;
+            })
+            .catch(function(e) {
+                addLogMessage('Training Log: background legend fetch failed: ' + e, 'error');
+                return loadLegendFromHiddenTrainingLogFrame(url);
+            });
+    }
+
+    function loadLegendFromHiddenTrainingLogFrame(url) {
+        return new Promise(function(resolve) {
+            if (!url) {
+                resolve(false);
+                return;
+            }
+            addLogMessage('Training Log: opening latest log in hidden frame for legend', 'log');
+            var iframe = document.createElement('iframe');
+            iframe.setAttribute('aria-hidden', 'true');
+            iframe.style.cssText = 'position: fixed; width: 1px; height: 1px; left: -9999px; top: -9999px; opacity: 0; pointer-events: none; border: 0;';
+            var done = false;
+            var pollTimer = null;
+            var timeoutTimer = null;
+            function cleanup(found) {
+                if (done) return;
+                done = true;
+                if (pollTimer) clearInterval(pollTimer);
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
+                resolve(!!found);
+            }
+            function tryReadLegend() {
+                try {
+                    var doc = iframe.contentDocument || (iframe.contentWindow && iframe.contentWindow.document);
+                    if (!doc) return false;
+                    var legendEl = doc.querySelector('.document-log-content__legend, .test-logLegend');
+                    if (!legendEl) return false;
+                    var text = extractLegendText(legendEl);
+                    if (!text) return false;
+                    savePersistedLegend(text);
+                    addLogMessage('Training Log: legend pulled from hidden latest log', 'log');
+                    cleanup(true);
+                    return true;
+                } catch (e) {
+                    addLogMessage('Training Log: hidden frame legend read failed: ' + e, 'error');
+                    cleanup(false);
+                    return false;
+                }
+            }
+            iframe.onload = function() {
+                if (tryReadLegend()) return;
+                pollTimer = setInterval(tryReadLegend, 500);
+            };
+            iframe.onerror = function() {
+                addLogMessage('Training Log: hidden latest log frame failed to load', 'error');
+                cleanup(false);
+            };
+            timeoutTimer = setTimeout(function() {
+                addLogMessage('Training Log: hidden latest log legend wait timed out', 'warn');
+                cleanup(false);
+            }, 12000);
+            iframe.src = url;
+            document.body.appendChild(iframe);
+        });
+    }
+
     function tryExtractLegend() {
         var legendText = extractLegendText();
         if (legendText) {
@@ -20453,32 +20650,56 @@ function showResponsibilitiesProgressPanel(rolesData) {
     function parseTrainingLogDates(text) {
         var dates = [];
         if (!text) return dates;
-        var re = /(?<![A-Za-z0-9])(\d{1,2})\s*([A-Za-z]{3,})\s*(\d{4})(?![A-Za-z0-9])/g;
+        function addDateCandidate(year, monthIdx, day, dateText, index) {
+            year = parseInt(year, 10);
+            monthIdx = parseInt(monthIdx, 10);
+            day = parseInt(day, 10);
+            if (year < 100) year += 2000;
+            if (monthIdx < 0 || monthIdx > 11) return;
+            var maxDay = TLOG_DAYS_IN_MONTH[monthIdx] + (monthIdx === 1 && isLeapYear(year) ? 1 : 0);
+            if (day < 1 || day > maxDay) return;
+            dates.push({
+                date: new Date(year, monthIdx, day),
+                dateText: dateText,
+                index: typeof index === 'number' ? index : 0
+            });
+        }
+        var re = /(?<![A-Za-z0-9])(\d{1,2})([\s-]*)([A-Za-z]{3,})([\s-]*)(\d{4})(?![A-Za-z0-9])/g;
         var match;
         while ((match = re.exec(text)) !== null) {
-            var day = parseInt(match[1], 10);
-            var monthLower = match[2].toLowerCase();
+            var monthLower = match[3].toLowerCase();
             var monthIdx = TLOG_MONTH_NAMES.indexOf(monthLower);
             if (monthIdx === -1) {
                 monthIdx = TLOG_MONTH_ABBR.indexOf(monthLower);
             }
             if (monthIdx === -1) continue;
-            var year = parseInt(match[3], 10);
-            var maxDay = TLOG_DAYS_IN_MONTH[monthIdx] + (monthIdx === 1 && isLeapYear(year) ? 1 : 0);
-            if (day < 1 || day > maxDay) continue;
-            dates.push({
-                date: new Date(year, monthIdx, day),
-                dateText: match[0],
-                index: match.index
-            });
+            addDateCandidate(match[5], monthIdx, match[1], match[0], match.index);
+        }
+        var monthFirstRe = /(?<![A-Za-z0-9])([A-Za-z]{3,})[\s.-]+(\d{1,2})(?:st|nd|rd|th)?[,]?[\s.-]+(\d{2,4})(?![A-Za-z0-9])/g;
+        while ((match = monthFirstRe.exec(text)) !== null) {
+            var monthFirstLower = match[1].toLowerCase();
+            var monthFirstIdx = TLOG_MONTH_NAMES.indexOf(monthFirstLower);
+            if (monthFirstIdx === -1) {
+                monthFirstIdx = TLOG_MONTH_ABBR.indexOf(monthFirstLower);
+            }
+            if (monthFirstIdx === -1) continue;
+            addDateCandidate(match[3], monthFirstIdx, match[2], match[0], match.index);
+        }
+        var isoRe = /(?<![A-Za-z0-9])(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?![A-Za-z0-9])/g;
+        while ((match = isoRe.exec(text)) !== null) {
+            addDateCandidate(match[1], parseInt(match[2], 10) - 1, match[3], match[0], match.index);
+        }
+        var slashRe = /(?<![A-Za-z0-9])(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})(?![A-Za-z0-9])/g;
+        while ((match = slashRe.exec(text)) !== null) {
+            addDateCandidate(match[3], parseInt(match[1], 10) - 1, match[2], match[0], match.index);
         }
         return dates;
     }
 
     function extractVersionNumber(text) {
-        var max = 1;
+        var max = 0;
         if (!text) return max;
-        var re = /(?:^|[^A-Za-z0-9])v[.]?\s*(\d+(?:\.\d+)?)(?=$|[^0-9])/gi;
+        var re = /(?:^|[^A-Za-z0-9])(?:v[.]?|ver(?:sion)?|version|rev(?:ision)?)[\s.#:-]*(\d+(?:\.\d+)?)(?=$|[^0-9])/gi;
         var match;
         while ((match = re.exec(text)) !== null) {
             var v = parseFloat(match[1]);
@@ -20492,8 +20713,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
     function isTrainingLogCandidateName(text) {
         var normalized = String(text || '').replace(/\s+/g, ' ').trim();
         if (!normalized) return false;
-        return /(?:^|[^A-Za-z0-9])training(?:$|[^A-Za-z0-9])/i.test(normalized) &&
-            /(?:^|[^A-Za-z0-9])log(?:$|[^A-Za-z0-9])/i.test(normalized);
+        if (/^(open|select item|actions?|more|download|edit|delete|archive)$/i.test(normalized)) return false;
+        return true;
     }
 
     function isElementTlogVisible(el) {
@@ -20505,7 +20726,31 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return true;
     }
 
-    function buildTrainingLogCandidate(text, sourceElement, index) {
+    function getTrainingLogRowDateInfo(row) {
+        if (!row) return null;
+        var dateEl = row.querySelector('[class*="item-date"], [class*="LastModified"], date-time, time');
+        var dateText = dateEl ? (dateEl.textContent || '').trim() : '';
+        if (!dateText) {
+            var cells = row.querySelectorAll('[role="cell"], td');
+            for (var i = cells.length - 1; i >= 0; i--) {
+                var cellText = (cells[i].textContent || '').trim();
+                if (parseTrainingLogDates(cellText).length > 0) {
+                    dateText = cellText;
+                    break;
+                }
+            }
+        }
+        if (!dateText) return null;
+        var dates = parseTrainingLogDates(dateText);
+        if (dates.length === 0) return null;
+        var latest = dates[0];
+        for (var d = 1; d < dates.length; d++) {
+            if (dates[d].date > latest.date) latest = dates[d];
+        }
+        return latest;
+    }
+
+    function buildTrainingLogCandidate(text, sourceElement, index, fallbackDateInfo) {
         if (!text) return null;
         var trimmed = text.replace(/\s+/g, ' ').trim();
         if (!trimmed) return null;
@@ -20521,6 +20766,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             date = mostRecent.date;
             dateText = mostRecent.dateText;
+        } else if (fallbackDateInfo && fallbackDateInfo.date) {
+            date = fallbackDateInfo.date;
+            dateText = null;
         } else if (version > 0) {
             date = new Date();
             dateText = getPstDateStringLike('01 Jan 2026');
@@ -20529,6 +20777,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return {
             element: sourceElement || null,
             text: trimmed,
+            href: sourceElement ? (sourceElement.href || sourceElement.getAttribute('href') || '') : '',
             date: date,
             dateText: dateText,
             version: version,
@@ -20569,25 +20818,64 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     function findBestTrainingLog() {
         var candidates = [];
-        var selector = 'a[href*="/documents/"], [role="row"] a, .folder-show__item-name-link, a[class*="item-name-link"], a';
+        var seen = new Set();
+        var rows = document.querySelectorAll('[role="row"].folder-show__item--loaded, [role="row"]');
+        for (var ri = 0; ri < rows.length; ri++) {
+            var row = rows[ri];
+            if (!isElementTlogVisible(row)) continue;
+            if (isInsideDocumentContent(row)) continue;
+            var rowLink = row.querySelector('a[href*="/documents/"].folder-show__item-name-link, a[href*="/documents/"][class*="itemNameLink"], a[href*="/documents/"]');
+            if (!rowLink || !isElementTlogVisible(rowLink)) continue;
+            var rowText = (rowLink.textContent || row.getAttribute('aria-label') || '').trim();
+            var rowHref = rowLink.href || rowLink.getAttribute('href') || '';
+            var rowKey = rowHref || rowText;
+            if (!rowKey || seen.has(rowKey)) continue;
+            seen.add(rowKey);
+            var rowCand = buildTrainingLogCandidate(rowText, rowLink, ri, getTrainingLogRowDateInfo(row));
+            if (!rowCand) continue;
+            candidates.push(rowCand);
+        }
+        var selector = 'a[href*="/documents/"].folder-show__item-name-link, a[href*="/documents/"][class*="itemNameLink"], a[href*="/documents/"]';
         var elements = document.querySelectorAll(selector);
         for (var i = 0; i < elements.length; i++) {
             var el = elements[i];
             if (!isElementTlogVisible(el)) continue;
             if (isInsideDocumentContent(el)) continue;
+            var href = el.href || el.getAttribute('href') || '';
             var text = (el.textContent || '').trim();
-            var cand = buildTrainingLogCandidate(text, el, i);
+            var key = href || text;
+            if (!key || seen.has(key)) continue;
+            seen.add(key);
+            var cand = buildTrainingLogCandidate(text, el, rows.length + i, getTrainingLogRowDateInfo(el.closest('[role="row"]')));
             if (!cand) continue;
             candidates.push(cand);
         }
         if (candidates.length === 0) return null;
         candidates.sort(function(a, b) {
-            if (a.version !== b.version) return b.version - a.version;
+            var aStudyScore = getTrainingLogStudyMatchScore(a);
+            var bStudyScore = getTrainingLogStudyMatchScore(b);
+            if (aStudyScore !== bStudyScore) return bStudyScore - aStudyScore;
             if (a.date.getTime() !== b.date.getTime()) return b.date.getTime() - a.date.getTime();
+            if (a.version !== b.version) return b.version - a.version;
             if (a.text.length !== b.text.length) return b.text.length - a.text.length;
             return a.index - b.index;
         });
         return candidates[0];
+    }
+
+    function getTrainingLogStudyMatchScore(candidate) {
+        if (!candidate || !candidate.text || !studyLibraryState.studies.length) return 0;
+        var bestLength = 0;
+        for (var i = 0; i < studyLibraryState.studies.length; i++) {
+            var protocol = String(studyLibraryState.studies[i].protocol || '').trim();
+            if (!protocol) continue;
+            var escaped = protocol.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
+            var re = new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '(?:[^A-Za-z0-9]|$)', 'i');
+            if (re.test(candidate.text) && protocol.length > bestLength) {
+                bestLength = protocol.length;
+            }
+        }
+        return bestLength;
     }
 
     function getPstDateString() {
@@ -20635,21 +20923,49 @@ function showResponsibilitiesProgressPanel(rolesData) {
         for (var j = 0; j < longParts.length; j++) {
             if (longParts[j].type === 'month') monthLong = longParts[j].value;
         }
-        var m = dateText.match(/^(\d{1,2})(\s*)([A-Za-z]{3,})(\s*)(\d{4})$/);
+        var monthNumber = String(parseInt(new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/Los_Angeles',
+            month: '2-digit'
+        }).format(d), 10)).padStart(2, '0');
+        var preserveMonthCase = function(value, original) {
+            if (!original) return value;
+            if (original === original.toUpperCase()) return value.toUpperCase();
+            if (original[0] === original[0].toUpperCase()) {
+                return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
+            }
+            return value.toLowerCase();
+        };
+        var m = dateText.match(/^(\d{1,2})([\s-]*)([A-Za-z]{3,})([\s-]*)(\d{4})$/);
+        if (!m) {
+            var compact = dateText.match(/^(\d{2})([A-Za-z]{3})(\d{4})$/);
+            if (compact) return day + monthShort + year;
+        }
+        if (!m) {
+            var monthFirst = dateText.match(/^([A-Za-z]{3,})([\s.-]+)(\d{1,2})(?:st|nd|rd|th)?(,?)([\s.-]+)(\d{2,4})$/);
+            if (monthFirst) {
+                var mfMonth = monthFirst[1].length > 3 ? monthLong : monthShort;
+                mfMonth = preserveMonthCase(mfMonth, monthFirst[1]);
+                var mfYear = monthFirst[6].length === 2 ? year.slice(2) : year;
+                var mfDay = monthFirst[3].length === 2 ? day : String(parseInt(day, 10));
+                return mfMonth + monthFirst[2] + mfDay + monthFirst[4] + monthFirst[5] + mfYear;
+            }
+        }
+        if (!m) {
+            var iso = dateText.match(/^(\d{2,4})([-/.])(\d{1,2})\2(\d{1,2})$/);
+            if (iso && iso[1].length === 4) {
+                return year + iso[2] + monthNumber + iso[2] + day;
+            }
+            if (iso) {
+                return monthNumber + iso[2] + day + iso[2] + (iso[1].length === 2 ? year.slice(2) : year);
+            }
+        }
         if (!m) return day + monthShort + year;
         var dayLen = m[1].length;
         var sep1 = m[2];
         var sep2 = m[4];
         var originalMonth = m[3];
         var month = originalMonth.length > 3 ? monthLong : monthShort;
-        var preserveCase = function(value, original) {
-            if (!original) return value;
-            if (original[0] === original[0].toUpperCase()) {
-                return value.charAt(0).toUpperCase() + value.slice(1).toLowerCase();
-            }
-            return value.toLowerCase();
-        };
-        month = preserveCase(month, originalMonth);
+        month = preserveMonthCase(month, originalMonth);
         var dayStr = dayLen === 2 ? day : String(parseInt(day, 10));
         return dayStr + sep1 + month + sep2 + year;
     }
@@ -20786,6 +21102,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return null;
     }
 
+    function findInputByAnyLabelText(container, labelTexts) {
+        for (var i = 0; i < labelTexts.length; i++) {
+            var input = findInputByLabelText(container, labelTexts[i]);
+            if (input) return input;
+        }
+        return null;
+    }
+
     function chooseTrainingLogTemplateName(logName) {
         var text = String(logName || '');
         if (/\bgroup\b/i.test(text)) return 'Group with Trainer 3';
@@ -20838,18 +21162,19 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var study = getTrainingLogMatchedStudyData();
         if (!study) return;
         var mappings = [
-            { label: 'Unique Protocol Number', value: study.protocol },
-            { label: 'Principal Investigator', value: study.pi },
-            { label: 'Site Number', value: study.siteNumber },
-            { label: 'Sponsor', value: study.sponsor },
-            { label: 'Trainer Name', value: study.trainer },
-            { label: 'Date of Training', value: getPstDateStringDashed() }
+            { labels: ['Unique Protocol Number', 'Protocol Number'], value: study.protocol },
+            { labels: ['Site Name'], value: study.siteName },
+            { labels: ['Site Number'], value: study.siteNumber },
+            { labels: ['Principal Investigator'], value: study.pi },
+            { labels: ['Sponsor'], value: study.sponsor },
+            { labels: ['Trainer Name', 'Trainer Name(s)', 'Trainer'], value: study.trainer },
+            { labels: ['Date of Training'], value: getPstDateStringDashed() }
         ];
         var filled = 0;
         for (var i = 0; i < mappings.length; i++) {
             var mapping = mappings[i];
             if (!mapping.value) continue;
-            var input = findInputByLabelText(modal, mapping.label);
+            var input = findInputByAnyLabelText(modal, mapping.labels);
             if (!input) continue;
             if (input.value !== String(mapping.value)) {
                 setFlorenceNativeValue(input, mapping.value);
@@ -21850,7 +22175,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     trainingLogState.persisted = {
                         latestTrainingLog: log.text,
                         todaysLogName: todayName,
-                        legends: trainingLogState.persisted.legends,
+                        legends: '',
                         matchedStudy: formatMatchedStudy(study),
                         matchedStudyData: study ? {
                             protocol: study.protocol || '',
@@ -21865,19 +22190,24 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     saveLatestTrainingLogPersisted(trainingLogState.persisted).then(function() {
                         addLogMessage('Training Log: persisted latest log', 'log');
                         scheduleTrainingLogModalAutofill();
+                        fetchLegendFromTrainingLog(log).then(function(found) {
+                            if (!found) tryExtractLegend();
+                        });
                     }).catch(function(e) {
                         addLogMessage('Training Log: persist failed: ' + e, 'error');
                     });
                     addLogMessage('Training Log protocol extracted: ' + (study ? study.protocol : 'none') + ', study ' + (study ? 'matched' : 'not configured'), 'log');
                 } else {
                     addLogMessage('Training Log: same as existing persisted log, keeping current', 'log');
+                    fetchLegendFromTrainingLog(log).then(function(found) {
+                        if (!found) tryExtractLegend();
+                    });
                 }
                 setTlogStatus('success', 'Latest Training Log Found');
             } else {
                 setTlogStatus('empty', 'No Training Log Found');
             }
             updateTrainingLogDisplay();
-            tryExtractLegend();
         } catch (e) {
             setTlogStatus('error', 'Error scanning page');
             addLogMessage('Training Log scan error: ' + e, 'error');
@@ -21993,6 +22323,223 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function makeTrainingLogStaffButton(text, variant) {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = text;
+        var styles = {
+            primary: 'background: #2563eb; border-color: #2563eb; color: #ffffff;',
+            success: 'background: #16a34a; border-color: #16a34a; color: #ffffff;',
+            danger: 'background: #ffffff; border-color: #fecaca; color: #dc2626;',
+            neutral: 'background: #ffffff; border-color: #d1d5db; color: #374151;'
+        };
+        btn.style.cssText = (styles[variant] || styles.neutral) + ' border-width: 1px; border-style: solid; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s ease; white-space: nowrap;';
+        btn.onmouseover = function() {
+            if (variant === 'primary') { btn.style.background = '#1d4ed8'; btn.style.borderColor = '#1d4ed8'; }
+            else if (variant === 'success') { btn.style.background = '#15803d'; btn.style.borderColor = '#15803d'; }
+            else if (variant === 'danger') { btn.style.background = '#fee2e2'; }
+            else { btn.style.background = '#f3f4f6'; }
+        };
+        btn.onmouseout = function() {
+            var base = styles[variant] || styles.neutral;
+            btn.style.cssText = base + ' border-width: 1px; border-style: solid; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; transition: all 0.15s ease; white-space: nowrap;';
+        };
+        return btn;
+    }
+
+    function renderTrainingLogPiList() {
+        var list = document.getElementById('florence-tlog-pi-list');
+        if (!list) return;
+        list.innerHTML = '';
+        var pis = trainingLogState.staffList.pis || [];
+        if (pis.length === 0) {
+            var empty = document.createElement('div');
+            empty.textContent = 'No Principal Investigators added.';
+            empty.style.cssText = 'color: #6b7280; font-size: 12px; padding: 8px 0; font-style: italic;';
+            list.appendChild(empty);
+            return;
+        }
+        for (var i = 0; i < pis.length; i++) {
+            (function(piName) {
+                var row = document.createElement('div');
+                row.style.cssText = 'display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 8px; padding: 7px 8px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 6px;';
+                var cb = document.createElement('input');
+                cb.type = 'checkbox';
+                cb.checked = trainingLogState.staffList.selectedPi === piName;
+                cb.setAttribute('aria-label', 'Select ' + piName + ' as Principal Investigator');
+                cb.style.cssText = 'width: 16px; height: 16px; cursor: pointer; accent-color: #2563eb;';
+                cb.onchange = function() {
+                    trainingLogState.staffList.selectedPi = cb.checked ? piName : '';
+                    saveTrainingLogStaffListPis().then(renderTrainingLogPiList);
+                };
+                var name = document.createElement('div');
+                name.textContent = piName;
+                name.title = piName;
+                name.style.cssText = 'color: #111827; font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;';
+                var editBtn = makeTrainingLogStaffButton('Edit', 'neutral');
+                editBtn.onclick = function() {
+                    row.innerHTML = '';
+                    row.style.gridTemplateColumns = 'minmax(0, 1fr) auto auto';
+                    var input = document.createElement('input');
+                    input.type = 'text';
+                    input.value = piName;
+                    input.style.cssText = 'width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid #bfdbfe; border-radius: 6px; font-size: 13px; color: #111827; outline: none; box-sizing: border-box;';
+                    var saveBtn = makeTrainingLogStaffButton('Save', 'primary');
+                    var cancelBtn = makeTrainingLogStaffButton('Cancel', 'neutral');
+                    saveBtn.onclick = function() {
+                        var nextName = input.value.replace(/\s+/g, ' ').trim();
+                        if (!nextName) return;
+                        var nextKey = elogNormalizeName(nextName);
+                        for (var p = 0; p < trainingLogState.staffList.pis.length; p++) {
+                            if (trainingLogState.staffList.pis[p] !== piName && elogNormalizeName(trainingLogState.staffList.pis[p]) === nextKey) return;
+                        }
+                        for (var x = 0; x < trainingLogState.staffList.pis.length; x++) {
+                            if (trainingLogState.staffList.pis[x] === piName) {
+                                trainingLogState.staffList.pis[x] = nextName;
+                                break;
+                            }
+                        }
+                        if (trainingLogState.staffList.selectedPi === piName) trainingLogState.staffList.selectedPi = nextName;
+                        saveTrainingLogStaffListPis().then(renderTrainingLogPiList);
+                    };
+                    cancelBtn.onclick = renderTrainingLogPiList;
+                    row.appendChild(input);
+                    row.appendChild(saveBtn);
+                    row.appendChild(cancelBtn);
+                    input.focus();
+                    input.select();
+                };
+                var removeBtn = makeTrainingLogStaffButton('Remove', 'danger');
+                removeBtn.onclick = function() {
+                    trainingLogState.staffList.pis = trainingLogState.staffList.pis.filter(function(name) { return name !== piName; });
+                    if (trainingLogState.staffList.selectedPi === piName) trainingLogState.staffList.selectedPi = '';
+                    saveTrainingLogStaffListPis().then(renderTrainingLogPiList);
+                };
+                row.appendChild(cb);
+                row.appendChild(name);
+                row.appendChild(editBtn);
+                row.appendChild(removeBtn);
+                list.appendChild(row);
+            })(pis[i]);
+        }
+    }
+
+    function createTrainingLogStaffListCard(makeCard) {
+        var card = makeCard('List of Staffs');
+        var piHeader = document.createElement('div');
+        piHeader.textContent = 'PIs';
+        piHeader.style.cssText = 'color: #111827; font-size: 13px; font-weight: 700;';
+        card.appendChild(piHeader);
+
+        var addRow = document.createElement('div');
+        addRow.style.cssText = 'display: flex; gap: 8px; align-items: center;';
+        var piInput = document.createElement('input');
+        piInput.id = 'florence-tlog-pi-input';
+        piInput.type = 'text';
+        piInput.placeholder = 'Add Principal Investigator';
+        piInput.style.cssText = 'flex: 1; min-width: 0; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 6px; color: #111827; font-size: 13px; box-sizing: border-box;';
+        var addPiBtn = makeTrainingLogStaffButton('Add PI', 'primary');
+        addPiBtn.onclick = function() {
+            var name = piInput.value.replace(/\s+/g, ' ').trim();
+            if (!name) return;
+            var key = elogNormalizeName(name);
+            for (var i = 0; i < trainingLogState.staffList.pis.length; i++) {
+                if (elogNormalizeName(trainingLogState.staffList.pis[i]) === key) {
+                    piInput.value = '';
+                    return;
+                }
+            }
+            trainingLogState.staffList.pis.push(name);
+            if (!trainingLogState.staffList.selectedPi) trainingLogState.staffList.selectedPi = name;
+            piInput.value = '';
+            saveTrainingLogStaffListPis().then(renderTrainingLogPiList);
+        };
+        piInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addPiBtn.click();
+            }
+        });
+        addRow.appendChild(piInput);
+        addRow.appendChild(addPiBtn);
+        card.appendChild(addRow);
+
+        var piList = document.createElement('div');
+        piList.id = 'florence-tlog-pi-list';
+        piList.style.cssText = 'display: flex; flex-direction: column; gap: 6px;';
+        card.appendChild(piList);
+
+        var staffLabel = document.createElement('label');
+        staffLabel.htmlFor = 'florence-tlog-staff-textarea';
+        staffLabel.textContent = 'Non-PIs';
+        staffLabel.style.cssText = 'color: #111827; font-size: 13px; font-weight: 700; margin-top: 4px;';
+        card.appendChild(staffLabel);
+
+        var staffTextarea = document.createElement('textarea');
+        staffTextarea.id = 'florence-tlog-staff-textarea';
+        staffTextarea.placeholder = 'One staff name per line';
+        staffTextarea.value = trainingLogState.staffList.nonPiText || '';
+        staffTextarea.style.cssText = 'width: 100%; min-height: 120px; padding: 10px 11px; border: 1px solid #d1d5db; border-radius: 6px; color: #111827; font-size: 13px; line-height: 1.4; resize: vertical; box-sizing: border-box; font-family: inherit;';
+        card.appendChild(staffTextarea);
+
+        var status = document.createElement('div');
+        status.id = 'florence-tlog-staff-save-status';
+        status.textContent = trainingLogState.staffList.nonPiText ? 'Staff list saved for this session.' : '';
+        status.style.cssText = 'min-height: 16px; color: #6b7280; font-size: 11px;';
+        card.appendChild(status);
+
+        var actions = document.createElement('div');
+        actions.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;';
+        var clearBtn = makeTrainingLogStaffButton('Clear', 'neutral');
+        var saveBtn = makeTrainingLogStaffButton('Save', 'success');
+        var runBtn = makeTrainingLogStaffButton('Run', 'primary');
+        clearBtn.onclick = function() {
+            staffTextarea.value = '';
+            saveTrainingLogStaffListNonPi('');
+            status.textContent = 'Staff list cleared.';
+        };
+        saveBtn.onclick = function() {
+            saveTrainingLogStaffListNonPi(staffTextarea.value);
+            status.textContent = 'Staff list saved for this session.';
+        };
+        runBtn.onclick = function() {
+            var currentText = staffTextarea.value;
+            if (currentText !== trainingLogState.staffList.nonPiText) {
+                status.textContent = 'Save changes before running.';
+                status.style.color = '#b45309';
+                return;
+            }
+            status.style.color = '#6b7280';
+            var combined = '';
+            if (trainingLogState.staffList.selectedPi) combined += trainingLogState.staffList.selectedPi + '\n';
+            combined += trainingLogState.staffList.nonPiText || '';
+            if (!combined.trim()) {
+                status.textContent = 'Add a PI or saved staff list before running.';
+                status.style.color = '#dc2626';
+                return;
+            }
+            runELogStaffEntriesFromText(combined, runBtn, 'Training Log List of Staffs');
+        };
+        actions.appendChild(clearBtn);
+        actions.appendChild(saveBtn);
+        actions.appendChild(runBtn);
+        card.appendChild(actions);
+
+        setTimeout(renderTrainingLogPiList, 0);
+        return card;
+    }
+
+    function updateTrainingLogStaffListDisplay() {
+        var textarea = document.getElementById('florence-tlog-staff-textarea');
+        if (textarea) textarea.value = trainingLogState.staffList.nonPiText || '';
+        var status = document.getElementById('florence-tlog-staff-save-status');
+        if (status) {
+            status.style.color = '#6b7280';
+            status.textContent = trainingLogState.staffList.nonPiText ? 'Staff list saved for this session.' : '';
+        }
+        renderTrainingLogPiList();
+    }
+
     function createTrainingLogView() {
         var container = document.createElement('div');
         container.id = 'florence-training-log-view';
@@ -22055,6 +22602,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
             card.appendChild(title);
             return card;
         }
+
+        var staffListCard = createTrainingLogStaffListCard(makeCard);
+        container.appendChild(staffListCard);
 
         var originalCard = makeCard('Latest Training Log');
         var originalValue = document.createElement('div');
@@ -22182,6 +22732,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             setTlogStatus('empty', 'Set Active to scan for training logs');
         }
         updateTrainingLogDisplay();
+        updateTrainingLogStaffListDisplay();
     }
 
     function florenceLoadAndApplyTabState() {
@@ -22919,11 +23470,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         guiContainer.appendChild(logBox);
 
         florenceLoadAndApplyTabState();
-
-        if (loadHideLogs()) {
-            applyHideLogs(true);
-        }
         document.body.appendChild(guiContainer);
+        applyHideLogs(loadHideLogs());
         addLogMessage('Florence Automator GUI initialized', 'log');
     }
 
