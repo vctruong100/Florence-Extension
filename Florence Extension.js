@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.15
+// Version: 2.5.23
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -21014,6 +21014,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return '';
     }
 
+    function getCurrentBreadcrumbContextText() {
+        var parts = [];
+        var add = function(text) {
+            text = String(text || '').replace(/\s+/g, ' ').trim();
+            if (text && parts.indexOf(text) === -1) {
+                parts.push(text);
+            }
+        };
+        var breadcrumbRoots = document.querySelectorAll('section[aria-label="Breadcrumb"], .breadcrumbs, .breadcrumb, nav[aria-label="breadcrumb"], nav[aria-label="Breadcrumb"]');
+        for (var i = 0; i < breadcrumbRoots.length; i++) {
+            add(breadcrumbRoots[i].textContent);
+            var linksAndItems = breadcrumbRoots[i].querySelectorAll('a, [role="menuitem"], .crumb-link, .crumb, .shrunk');
+            for (var j = 0; j < linksAndItems.length; j++) {
+                add(linksAndItems[j].textContent);
+            }
+        }
+        add(getCurrentBreadcrumbName());
+        return parts.join(' ');
+    }
+
     function getPageTitleCandidates() {
         var candidates = [];
         var add = function(s) {
@@ -21285,7 +21305,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 index: typeof index === 'number' ? index : 0
             });
         }
-        var re = /(?<![A-Za-z0-9])(\d{1,2})([\s-]*)([A-Za-z]{3,})([\s-]*)(\d{4})(?![A-Za-z0-9])/g;
+        var re = /(?<![A-Za-z0-9])(\d{1,2})([\s-]*)([A-Za-z]{3,})([\s-]*)(\d{2,4})(?![A-Za-z0-9])/g;
         var match;
         while ((match = re.exec(text)) !== null) {
             var monthLower = match[3].toLowerCase();
@@ -21329,6 +21349,63 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
         }
         return max;
+    }
+
+    function getLatestTrainingLogDateInfo(dates) {
+        if (!dates || dates.length === 0) return null;
+        var latest = dates[0];
+        for (var i = 1; i < dates.length; i++) {
+            if (dates[i].date > latest.date) latest = dates[i];
+        }
+        return latest;
+    }
+
+    function getEndMostTrainingLogDateInfo(dates) {
+        if (!dates || dates.length === 0) return null;
+        var endMost = dates[0];
+        for (var i = 1; i < dates.length; i++) {
+            if (dates[i].index > endMost.index) {
+                endMost = dates[i];
+            } else if (dates[i].index === endMost.index && dates[i].date > endMost.date) {
+                endMost = dates[i];
+            }
+        }
+        return endMost;
+    }
+
+    function extractTrainingLogDocumentDateInfo(text) {
+        if (!text) return null;
+        var normalized = String(text);
+        var versionRe = /(?:^|[^A-Za-z0-9])(?:v[.]?|ver(?:sion)?|version|rev(?:ision)?)[\s.#:-]*\d+(?:\.\d+)?/gi;
+        var match;
+        while ((match = versionRe.exec(normalized)) !== null) {
+            var afterVersion = normalized.slice(versionRe.lastIndex, versionRe.lastIndex + 100);
+            var paren = afterVersion.match(/^\s*\(([^)]{4,40})\)/);
+            if (!paren) continue;
+            var dates = parseTrainingLogDates(paren[1]);
+            var dateInfo = getLatestTrainingLogDateInfo(dates);
+            if (dateInfo) {
+                dateInfo.index = versionRe.lastIndex + afterVersion.indexOf(paren[1]) + dateInfo.index;
+                return dateInfo;
+            }
+        }
+        return null;
+    }
+
+    function getTrainingLogSessionDateInfo(dates, documentDateInfo) {
+        if (!dates || dates.length === 0) return null;
+        var docIndex = documentDateInfo && typeof documentDateInfo.index === 'number' ? documentDateInfo.index : -1;
+        var docText = documentDateInfo && documentDateInfo.dateText ? String(documentDateInfo.dateText) : '';
+        var best = null;
+        for (var i = 0; i < dates.length; i++) {
+            var cand = dates[i];
+            if (!cand || !cand.date) continue;
+            if (docIndex >= 0 && cand.index === docIndex && cand.dateText === docText) continue;
+            if (!best || cand.date > best.date) {
+                best = cand;
+            }
+        }
+        return best;
     }
 
     function isTrainingLogCandidateName(text) {
@@ -21378,15 +21455,18 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (!isTrainingLogCandidateName(trimmed)) return null;
         var version = extractVersionNumber(trimmed);
         var dates = parseTrainingLogDates(trimmed);
+        var documentDateInfo = extractTrainingLogDocumentDateInfo(trimmed);
+        var latestTextDateInfo = getLatestTrainingLogDateInfo(dates);
+        var endMostDateInfo = getEndMostTrainingLogDateInfo(dates);
+        var sessionDateInfo = getTrainingLogSessionDateInfo(dates, documentDateInfo);
         var date = null;
         var dateText = null;
-        if (dates.length > 0) {
-            var mostRecent = dates[0];
-            for (var d = 1; d < dates.length; d++) {
-                if (dates[d].date > mostRecent.date) mostRecent = dates[d];
-            }
-            date = mostRecent.date;
-            dateText = mostRecent.dateText;
+        if (endMostDateInfo && endMostDateInfo.date) {
+            date = endMostDateInfo.date;
+            dateText = endMostDateInfo.dateText;
+        } else if (latestTextDateInfo && latestTextDateInfo.date) {
+            date = latestTextDateInfo.date;
+            dateText = latestTextDateInfo.dateText;
         } else if (fallbackDateInfo && fallbackDateInfo.date) {
             date = fallbackDateInfo.date;
             dateText = null;
@@ -21401,6 +21481,16 @@ function showResponsibilitiesProgressPanel(rolesData) {
             href: sourceElement ? (sourceElement.href || sourceElement.getAttribute('href') || '') : '',
             date: date,
             dateText: dateText,
+            documentDate: documentDateInfo && documentDateInfo.date ? documentDateInfo.date : null,
+            documentDateText: documentDateInfo && documentDateInfo.dateText ? documentDateInfo.dateText : '',
+            sessionDate: sessionDateInfo && sessionDateInfo.date ? sessionDateInfo.date : null,
+            sessionDateText: sessionDateInfo && sessionDateInfo.dateText ? sessionDateInfo.dateText : '',
+            endMostDate: endMostDateInfo && endMostDateInfo.date ? endMostDateInfo.date : null,
+            endMostDateText: endMostDateInfo && endMostDateInfo.dateText ? endMostDateInfo.dateText : '',
+            endMostDateIndex: endMostDateInfo && typeof endMostDateInfo.index === 'number' ? endMostDateInfo.index : -1,
+            selectedDateIndex: endMostDateInfo && typeof endMostDateInfo.index === 'number' ? endMostDateInfo.index : -1,
+            latestTextDate: latestTextDateInfo && latestTextDateInfo.date ? latestTextDateInfo.date : null,
+            latestTextDateText: latestTextDateInfo && latestTextDateInfo.dateText ? latestTextDateInfo.dateText : '',
             version: version,
             index: typeof index === 'number' ? index : 0
         };
@@ -21482,11 +21572,20 @@ function showResponsibilitiesProgressPanel(rolesData) {
     function rankTrainingLogCandidates(candidates) {
         if (candidates.length === 0) return null;
         candidates.sort(function(a, b) {
+            if (a.version !== b.version) return b.version - a.version;
+            var aEndTime = a.endMostDate ? a.endMostDate.getTime() : 0;
+            var bEndTime = b.endMostDate ? b.endMostDate.getTime() : 0;
+            if (aEndTime !== bEndTime) return bEndTime - aEndTime;
+            var aSessionTime = a.sessionDate ? a.sessionDate.getTime() : 0;
+            var bSessionTime = b.sessionDate ? b.sessionDate.getTime() : 0;
+            if (aSessionTime !== bSessionTime) return bSessionTime - aSessionTime;
+            var aDocTime = a.documentDate ? a.documentDate.getTime() : 0;
+            var bDocTime = b.documentDate ? b.documentDate.getTime() : 0;
+            if (aDocTime !== bDocTime) return bDocTime - aDocTime;
+            if (a.date.getTime() !== b.date.getTime()) return b.date.getTime() - a.date.getTime();
             var aStudyScore = getTrainingLogStudyMatchScore(a);
             var bStudyScore = getTrainingLogStudyMatchScore(b);
             if (aStudyScore !== bStudyScore) return bStudyScore - aStudyScore;
-            if (a.date.getTime() !== b.date.getTime()) return b.date.getTime() - a.date.getTime();
-            if (a.version !== b.version) return b.version - a.version;
             if (a.text.length !== b.text.length) return b.text.length - a.text.length;
             return a.index - b.index;
         });
@@ -21628,7 +21727,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             return value.toLowerCase();
         };
-        var m = dateText.match(/^(\d{1,2})([\s-]*)([A-Za-z]{3,})([\s-]*)(\d{4})$/);
+        var m = dateText.match(/^(\d{1,2})([\s-]*)([A-Za-z]{3,})([\s-]*)(\d{2,4})$/);
         if (!m) {
             var compact = dateText.match(/^(\d{2})([A-Za-z]{3})(\d{4})$/);
             if (compact) return day + monthShort + year;
@@ -21657,18 +21756,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var sep1 = m[2];
         var sep2 = m[4];
         var originalMonth = m[3];
+        var yearLen = m[5].length;
         var month = originalMonth.length > 3 ? monthLong : monthShort;
         month = preserveMonthCase(month, originalMonth);
         var dayStr = dayLen === 2 ? day : String(parseInt(day, 10));
-        return dayStr + sep1 + month + sep2 + year;
+        var yearStr = yearLen === 2 ? year.slice(2) : year;
+        return dayStr + sep1 + month + sep2 + yearStr;
     }
 
-    function replaceLogDateWithToday(originalText, dateText) {
+    function replaceLogDateWithToday(originalText, dateText, dateIndex) {
         if (!originalText) return originalText;
         if (!dateText) {
             return originalText + ' ' + getPstDateStringLike('01 Jan 2026');
         }
-        var idx = originalText.indexOf(dateText);
+        var idx = -1;
+        if (typeof dateIndex === 'number' && dateIndex >= 0 && originalText.substr(dateIndex, dateText.length) === dateText) {
+            idx = dateIndex;
+        }
+        if (idx === -1) {
+            idx = originalText.lastIndexOf(dateText);
+        }
         if (idx === -1) {
             return originalText + ' ' + getPstDateStringLike('01 Jan 2026');
         }
@@ -21693,6 +21800,53 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return best;
     }
 
+    function findStudyForTrainingLogContext(logText) {
+        var study = findStudyForLog(logText);
+        if (study) return study;
+        var breadcrumbText = getCurrentBreadcrumbContextText();
+        if (breadcrumbText) {
+            addLogMessage('Training Log: checking breadcrumb context for matched study', 'log');
+        }
+        study = findStudyForLog(breadcrumbText);
+        if (study) {
+            addLogMessage('Training Log: matched study from breadcrumb context', 'log');
+        }
+        return study;
+    }
+
+    function getTrainingLogStudyPersistedData(study) {
+        if (!study) return null;
+        return {
+            protocol: study.protocol || '',
+            siteName: study.siteName || '',
+            siteNumber: study.siteNumber || '',
+            trainer: study.trainer || '',
+            sponsor: study.sponsor || '',
+            pi: study.pi || ''
+        };
+    }
+
+    function refreshPersistedTrainingLogStudyFromContext(log) {
+        if (!log || !trainingLogState.persisted) return false;
+        if (trainingLogState.persisted.matchedStudyData && trainingLogState.persisted.matchedStudy) return false;
+        var study = findStudyForTrainingLogContext(log.text);
+        if (!study) {
+            addLogMessage('Training Log protocol extracted: none, study not configured', 'log');
+            return false;
+        }
+        trainingLogState.persisted.matchedStudy = formatMatchedStudy(study);
+        trainingLogState.persisted.matchedStudyData = getTrainingLogStudyPersistedData(study);
+        saveLatestTrainingLogPersisted(trainingLogState.persisted).then(function() {
+            addLogMessage('Training Log: persisted breadcrumb matched study', 'log');
+            updateTrainingLogDisplay();
+            scheduleTrainingLogModalAutofill();
+        }).catch(function(e) {
+            addLogMessage('Training Log: study context persist failed: ' + e, 'error');
+        });
+        addLogMessage('Training Log protocol extracted: ' + study.protocol + ', study matched', 'log');
+        return true;
+    }
+
     function normalizeTlogModalText(text) {
         return String(text || '').replace(/\s+/g, ' ').trim();
     }
@@ -21702,7 +21856,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (persisted.matchedStudyData && typeof persisted.matchedStudyData === 'object') {
             return persisted.matchedStudyData;
         }
-        return findStudyForLog(persisted.latestTrainingLog || persisted.todaysLogName || '');
+        return findStudyForTrainingLogContext(persisted.latestTrainingLog || persisted.todaysLogName || '');
     }
 
     function setFlorenceNativeValue(el, value) {
@@ -22876,21 +23030,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (log) {
                 addLogMessage('Training Log matched: ' + log.text + ' (date: ' + log.date.toDateString() + ')', 'log');
                 if (shouldReplaceTrainingLog(log, trainingLogState.persisted)) {
-                    var study = findStudyForLog(log.text);
-                    var todayName = replaceLogDateWithToday(log.text, log.dateText);
+                    var study = findStudyForTrainingLogContext(log.text);
+                    var todayName = replaceLogDateWithToday(log.text, log.dateText, log.selectedDateIndex);
                     trainingLogState.persisted = {
                         latestTrainingLog: log.text,
                         todaysLogName: todayName,
                         legends: '',
                         matchedStudy: formatMatchedStudy(study),
-                        matchedStudyData: study ? {
-                            protocol: study.protocol || '',
-                            siteName: study.siteName || '',
-                            siteNumber: study.siteNumber || '',
-                            trainer: study.trainer || '',
-                            sponsor: study.sponsor || '',
-                            pi: study.pi || ''
-                        } : null,
+                        matchedStudyData: getTrainingLogStudyPersistedData(study),
                         detectedAt: new Date().toISOString()
                     };
                     saveLatestTrainingLogPersisted(trainingLogState.persisted).then(function() {
@@ -22903,6 +23050,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     addLogMessage('Training Log protocol extracted: ' + (study ? study.protocol : 'none') + ', study ' + (study ? 'matched' : 'not configured'), 'log');
                 } else {
                     addLogMessage('Training Log: same as existing persisted log, keeping current', 'log');
+                    refreshPersistedTrainingLogStudyFromContext(log);
                     fetchLegendFromTrainingLog(log);
                 }
                 setTlogStatus('success', 'Latest Training Log Found');
