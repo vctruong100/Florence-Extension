@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.3
+// Version: 2.5.15
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -4076,10 +4076,12 @@
             return;
         }
         addLogMessage('verifyScrollAndCollectNames: viewport found, starting proper scroll collection', 'log');
+        var fullPassCount = 0;
+        var maxFullPasses = 3;
+        var passStartCount = verifyState.scannedNames.length;
         var lastScrollTop = -1;
-        var lastSnapshot = '';
-        var passCount = 0;
-        var maxPasses = 5;
+        var stalledSteps = 0;
+        viewport.scrollTop = 0;
         function collectVisibleNames() {
             var items = viewport.querySelectorAll('li.filtered-select__list__item, li[role="option"]');
             var currentTexts = [];
@@ -4098,6 +4100,11 @@
             }
             return currentTexts.join('|');
         }
+        function finishCollection(reason) {
+            addLogMessage('verifyScrollAndCollectNames: scan complete (' + reason + ') - collected ' + verifyState.scannedNames.length + ' unique names', 'log');
+            removeCollectingDataPanel('verify');
+            showVerifyThreePanelLayout();
+        }
         function scrollStep() {
             if (!verifyState.isRunning) {
                 addLogMessage('verifyScrollAndCollectNames: stopped by user', 'warn');
@@ -4105,38 +4112,51 @@
                 showVerifyThreePanelLayout();
                 return;
             }
-            var snapshot = collectVisibleNames();
+            collectVisibleNames();
             var curTop = viewport.scrollTop;
-            if (curTop === lastScrollTop && snapshot === lastSnapshot) {
-                passCount++;
-                addLogMessage('verifyScrollAndCollectNames: no progress, pass ' + passCount, 'log');
-            } else {
-                passCount = 0;
-            }
-            if (passCount >= maxPasses) {
-                addLogMessage('verifyScrollAndCollectNames: scan complete - collected ' + verifyState.scannedNames.length + ' unique names', 'log');
-                removeCollectingDataPanel('verify');
-                showVerifyThreePanelLayout();
+            var maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+            if (maxScroll <= 0) {
+                finishCollection('single visible page');
                 return;
             }
-            lastScrollTop = curTop;
-            lastSnapshot = snapshot;
             var step = Math.round(viewport.clientHeight * 0.8);
             if (step < 50) step = 200;
-            var maxScroll = viewport.scrollHeight - viewport.clientHeight;
             var newTop = Math.min(curTop + step, maxScroll);
-            if (newTop <= curTop && curTop > 0) {
-                addLogMessage('verifyScrollAndCollectNames: reached bottom, wrapping to top for final pass', 'log');
-                newTop = 0;
+            var atBottom = curTop >= maxScroll - 2 || newTop <= curTop;
+            if (atBottom) {
+                fullPassCount++;
+                var foundNewNamesThisPass = verifyState.scannedNames.length > passStartCount;
+                addLogMessage('verifyScrollAndCollectNames: completed pass ' + fullPassCount + ', names=' + verifyState.scannedNames.length + ', newThisPass=' + foundNewNamesThisPass, 'log');
+                if (fullPassCount >= 2 && !foundNewNamesThisPass) {
+                    finishCollection('verified no new names on confirmation pass');
+                    return;
+                }
+                if (fullPassCount >= maxFullPasses) {
+                    finishCollection('maximum confirmation passes reached');
+                    return;
+                }
+                passStartCount = verifyState.scannedNames.length;
+                viewport.scrollTop = 0;
                 lastScrollTop = -1;
-                lastSnapshot = '';
-                passCount++;
+                stalledSteps = 0;
+                setTimeout(scrollStep, 180);
+                return;
+            }
+            if (Math.abs(newTop - lastScrollTop) < 2) {
+                stalledSteps++;
+            } else {
+                stalledSteps = 0;
+            }
+            if (stalledSteps >= 3) {
+                finishCollection('scroll stopped progressing');
+                return;
             }
             viewport.scrollTop = newTop;
-            addLogMessage('verifyScrollAndCollectNames: scrolled to ' + newTop + ' (max=' + maxScroll + ', step=' + step + ')', 'log');
-            setTimeout(scrollStep, 300);
+            lastScrollTop = newTop;
+            addLogMessage('verifyScrollAndCollectNames: scrolled to ' + newTop + ' (max=' + maxScroll + ', step=' + step + ', pass=' + (fullPassCount + 1) + ')', 'log');
+            setTimeout(scrollStep, 180);
         }
-        setTimeout(scrollStep, 400);
+        setTimeout(scrollStep, 250);
     }
 
     function updateVerifyScanStatus(statusText, statusType) {
@@ -5552,6 +5572,10 @@
         whitespace: /\s+/g
     };
 
+    const RESP_COMMON_RULES = {
+        consensusRatio: 0.75
+    };
+
     const RESP_ROLE_KEYWORD_MAP = [
         { keyword: 'sub-investigator', role: 'Sub-Investigator' },
         { keyword: 'sub investigator', role: 'Sub-Investigator' },
@@ -5592,26 +5616,36 @@
 
     const CLEAN_SELECTORS = {
         mainPanelButtonTarget: '.main-gui-panel',
-        ariaLiveRegion: '.aria-live-region'
+        ariaLiveRegion: '.aria-live-region',
+        studyResponsibilitiesSection: 'section.doa-log-form-step__container',
+        studyResponsibilitiesHeading: 'h5',
+        studyResponsibilityInput: 'input[formcontrolname="name"][placeholder="Enter Responsibility Name"], input[formcontrolname="name"]',
+        addStudyResponsibilityBtn: 'button[data-test="add-study-responsibility-button"].doa-log-form-step__button',
+        identifierButton: '.doa-log-form-step__choose-identifier button'
     };
 
     const CLEAN_TIMEOUTS = {
         waitInputPanelMs: 10000,
-        waitResultsPanelMs: 10000
+        waitResultsPanelMs: 10000,
+        waitAfterIdentifierClickMs: 350,
+        waitAfterAddFieldMs: 500,
+        waitAddFieldTimeoutMs: 5000
     };
 
     const CLEAN_LABELS = {
-        featureButton: 'Clean Study Task List',
-        inputTitle: 'Clean Study Task List Input',
-        resultsTitle: 'Cleaned Study Task List',
+        featureButton: 'Add Study Resp. (DoA Template)',
+        inputTitle: 'Add Study Responsibilities',
+        resultsTitle: 'Study Responsibilities',
         responsibilitiesHeader: 'Responsibilities',
-        confirm: 'Confirm',
+        confirm: 'Insert Responsibilities',
         clear: 'Clear All',
         close: 'Close',
         downloadXlsx: 'Download .xlsx',
         downloadCsv: 'Download CSV',
         parsing: 'Parsing and cleaning input',
         done: 'Cleaning complete',
+        inserting: 'Inserting study responsibilities',
+        insertComplete: 'Study responsibilities inserted',
         exportSuccess: 'Export file created',
         exportFailed: 'Export failed'
     };
@@ -5870,6 +5904,10 @@
                         rolePart = parts[emailIdx + 1].trim();
                         numberPart = parts.slice(emailIdx + 2).join(' ');
                         addLogMessage('parseResponsibilitiesInput: line ' + mi + ' staff table detected, role=' + rolePart, 'log');
+                    } else if (parts.length >= 3 && !/\d/.test(parts[1]) && /\d/.test(parts.slice(2).join(' '))) {
+                        rolePart = parts[1].trim();
+                        numberPart = parts.slice(2).join(' ');
+                        addLogMessage('parseResponsibilitiesInput: line ' + mi + ' staff table without email detected, role=' + rolePart, 'log');
                     } else {
                         rolePart = parts[0].trim();
                         numberPart = parts.slice(1).join(' ');
@@ -5932,27 +5970,22 @@
             var key = keys[ki];
             var entry = parsedMap[key];
             var union = new Set();
-            var intersection = null;
+            var counts = {};
             for (var oi = 0; oi < entry.occurrences.length; oi++) {
                 var occ = entry.occurrences[oi];
                 occ.forEach(function(n) {
                     union.add(n);
+                    counts[n] = (counts[n] || 0) + 1;
                 });
-                if (intersection === null) {
-                    intersection = new Set(occ);
-                } else {
-                    var newInt = new Set();
-                    intersection.forEach(function(n) {
-                        if (occ.has(n)) {
-                            newInt.add(n);
-                        }
-                    });
-                    intersection = newInt;
+            }
+            var occurrenceCount = entry.occurrences.length;
+            var consensusThreshold = occurrenceCount <= 2 ? occurrenceCount : Math.max(2, Math.ceil(occurrenceCount * RESP_COMMON_RULES.consensusRatio));
+            var intersection = new Set();
+            union.forEach(function(n) {
+                if ((counts[n] || 0) >= consensusThreshold) {
+                    intersection.add(n);
                 }
-            }
-            if (intersection === null) {
-                intersection = new Set();
-            }
+            });
             var excluded = new Set();
             union.forEach(function(n) {
                 if (!intersection.has(n)) {
@@ -5962,10 +5995,13 @@
             entry.union = union;
             entry.intersection = intersection;
             entry.excluded = excluded;
+            entry.commonThreshold = consensusThreshold;
+            entry.occurrenceCount = occurrenceCount;
+            entry.counts = counts;
             var status = RESP_LABELS.statusPending;
             if (intersection.size === 0) {
                 status = RESP_LABELS.statusFailed;
-                addLogMessage('computeRoleCommonAndExcluded: role=' + entry.displayRole + ' empty intersection', 'warn');
+                addLogMessage('computeRoleCommonAndExcluded: role=' + entry.displayRole + ' empty consensus set', 'warn');
             }
             rolesData.push({
                 key: key,
@@ -5977,10 +6013,12 @@
                     return a - b;
                 }),
                 intersection: intersection,
+                commonThreshold: consensusThreshold,
+                occurrenceCount: occurrenceCount,
                 status: status,
-                reason: intersection.size === 0 ? 'No common numbers across occurrences' : ''
+                reason: intersection.size === 0 ? 'No responsibility numbers met the consensus threshold' : ''
             });
-            addLogMessage('computeRoleCommonAndExcluded: role=' + entry.displayRole + ' common=[' + rolesData[rolesData.length - 1].common.join(',') + '] excluded=[' + rolesData[rolesData.length - 1].excluded.join(',') + ']', 'log');
+            addLogMessage('computeRoleCommonAndExcluded: role=' + entry.displayRole + ' consensusThreshold=' + consensusThreshold + '/' + occurrenceCount + ' common=[' + rolesData[rolesData.length - 1].common.join(',') + '] excluded=[' + rolesData[rolesData.length - 1].excluded.join(',') + ']', 'log');
         }
         return rolesData;
     }
@@ -6271,6 +6309,11 @@
         var commonLabel = document.createElement('div');
         commonLabel.innerHTML = '<strong style="color: #374151;">Common:</strong> ' + (roleData.common.length > 0 ? roleData.common.join(', ') : 'None');
         detailRow.appendChild(commonLabel);
+        if (roleData.occurrenceCount && roleData.occurrenceCount > 2) {
+            var thresholdLabel = document.createElement('div');
+            thresholdLabel.innerHTML = '<strong style="color: #374151;">Consensus:</strong> ' + roleData.commonThreshold + ' of ' + roleData.occurrenceCount + ' rows required';
+            detailRow.appendChild(thresholdLabel);
+        }
         if (roleData.excluded.length > 0) {
             var excludedLabel = document.createElement('div');
             excludedLabel.innerHTML = '<strong style="color: #374151;">Excluded:</strong> ' + roleData.excluded.join(', ');
@@ -7618,6 +7661,148 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function cleanDelay(ms) {
+        return new Promise(function(resolve) {
+            var tid = setTimeout(resolve, ms);
+            cleanState.timeouts.push(tid);
+        });
+    }
+
+    function cleanNormalizeVisibleText(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isCleanElementVisible(el) {
+        if (!el) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        var style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        return true;
+    }
+
+    function findDoaStudyResponsibilitiesSection() {
+        var sections = document.querySelectorAll(CLEAN_SELECTORS.studyResponsibilitiesSection);
+        for (var i = 0; i < sections.length; i++) {
+            var section = sections[i];
+            if (!isCleanElementVisible(section)) continue;
+            var heading = section.querySelector(CLEAN_SELECTORS.studyResponsibilitiesHeading);
+            var headingText = cleanNormalizeVisibleText(heading ? heading.textContent : '');
+            if (!/^Study Responsibilities$/i.test(headingText)) continue;
+            if (!section.querySelector(CLEAN_SELECTORS.studyResponsibilityInput)) continue;
+            return section;
+        }
+        return null;
+    }
+
+    function getCleanResponsibilityInputs(section) {
+        if (!section) return [];
+        var nodes = section.querySelectorAll(CLEAN_SELECTORS.studyResponsibilityInput);
+        var inputs = [];
+        for (var i = 0; i < nodes.length; i++) {
+            var input = nodes[i];
+            if (input.disabled || input.readOnly) continue;
+            if (!isCleanElementVisible(input)) continue;
+            inputs.push(input);
+        }
+        return inputs;
+    }
+
+    function getNextEmptyStudyResponsibilityInput(section) {
+        var inputs = getCleanResponsibilityInputs(section);
+        for (var i = 0; i < inputs.length; i++) {
+            if (cleanNormalizeVisibleText(inputs[i].value) === '') return inputs[i];
+        }
+        return null;
+    }
+
+    function findCleanIdentifierButton(section, label) {
+        var buttons = section ? section.querySelectorAll(CLEAN_SELECTORS.identifierButton) : [];
+        var target = String(label || '').toLowerCase();
+        for (var i = 0; i < buttons.length; i++) {
+            var text = cleanNormalizeVisibleText(buttons[i].textContent).toLowerCase();
+            if (text.indexOf(target) !== -1) return buttons[i];
+        }
+        return null;
+    }
+
+    async function ensureDoaStudyResponsibilitiesNumbers(section) {
+        var numbersBtn = findCleanIdentifierButton(section, 'Numbers');
+        if (!numbersBtn) {
+            throw new Error('Numbers identifier button was not found.');
+        }
+        var active = numbersBtn.classList.contains('doa-log-form-step__active-identifier') ||
+            numbersBtn.getAttribute('aria-pressed') === 'true';
+        if (active) return;
+        numbersBtn.scrollIntoView({ block: 'center', inline: 'nearest' });
+        numbersBtn.click();
+        await cleanDelay(CLEAN_TIMEOUTS.waitAfterIdentifierClickMs);
+    }
+
+    function findCleanAddStudyResponsibilityButton(section) {
+        var buttons = section ? section.querySelectorAll('button[data-test="add-study-responsibility-button"]') : [];
+        for (var i = 0; i < buttons.length; i++) {
+            var button = buttons[i];
+            if (!isCleanElementVisible(button) || button.disabled) continue;
+            var text = cleanNormalizeVisibleText(button.textContent);
+            if (/^Add Study Responsibility$/i.test(text) || button.classList.contains('doa-log-form-step__button')) {
+                if (!button.classList.contains('doa-log-form-step__import_excel_button')) return button;
+            }
+        }
+        return null;
+    }
+
+    async function addCleanStudyResponsibilityField(section) {
+        var beforeCount = getCleanResponsibilityInputs(section).length;
+        var addBtn = findCleanAddStudyResponsibilityButton(section);
+        if (!addBtn) {
+            throw new Error('Add Study Responsibility button was not found.');
+        }
+        addBtn.scrollIntoView({ block: 'center', inline: 'nearest' });
+        addBtn.click();
+        var start = Date.now();
+        while (Date.now() - start < CLEAN_TIMEOUTS.waitAddFieldTimeoutMs) {
+            await cleanDelay(CLEAN_TIMEOUTS.waitAfterAddFieldMs);
+            var freshSection = findDoaStudyResponsibilitiesSection() || section;
+            var emptyInput = getNextEmptyStudyResponsibilityInput(freshSection);
+            var count = getCleanResponsibilityInputs(freshSection).length;
+            if (emptyInput && count > beforeCount) return freshSection;
+            if (emptyInput && count >= beforeCount) return freshSection;
+        }
+        throw new Error('Timed out waiting for a new Study Responsibility field.');
+    }
+
+    async function insertCleanResponsibilitiesIntoDoaTemplate(items) {
+        var section = findDoaStudyResponsibilitiesSection();
+        if (!section) {
+            throw new Error('Study Responsibilities section was not found. Open the DoA Template Study Responsibilities step first.');
+        }
+        await ensureDoaStudyResponsibilitiesNumbers(section);
+        updateCleanAriaLive(CLEAN_LABELS.inserting);
+        var inserted = 0;
+        for (var i = 0; i < items.length; i++) {
+            if (cleanState.stopRequested) throw new Error('Insertion stopped.');
+            var value = cleanNormalizeVisibleText(items[i] && items[i].text ? items[i].text : items[i]);
+            if (!value) continue;
+            section = findDoaStudyResponsibilitiesSection() || section;
+            var input = getNextEmptyStudyResponsibilityInput(section);
+            if (!input) {
+                section = await addCleanStudyResponsibilityField(section);
+                input = getNextEmptyStudyResponsibilityInput(section);
+            }
+            if (!input) {
+                throw new Error('No empty Study Responsibility field was available for item ' + (i + 1) + '.');
+            }
+            input.scrollIntoView({ block: 'center', inline: 'nearest' });
+            input.focus();
+            setFlorenceNativeValue(input, value);
+            inserted++;
+            await cleanDelay(80);
+        }
+        updateCleanAriaLive(CLEAN_LABELS.insertComplete);
+        return inserted;
+    }
+
     function buildOutputModel(items) {
         addLogMessage('buildOutputModel: building model with ' + items.length + ' items', 'log');
         var headerLine = CLEAN_LABELS.responsibilitiesHeader;
@@ -7699,12 +7884,178 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function resetCleanInputPanelShape() {
+        var inputPanel = document.getElementById('clean-input-panel');
+        if (!inputPanel) {
+            return;
+        }
+        inputPanel.style.borderTopLeftRadius = '12px';
+        inputPanel.style.borderTopRightRadius = '12px';
+        inputPanel.style.borderBottomLeftRadius = '12px';
+        inputPanel.style.borderBottomRightRadius = '12px';
+        inputPanel.style.boxShadow = '0 20px 40px rgba(0, 0, 0, 0.15)';
+    }
+
+    function positionCleanListPreviewPanel(panel) {
+        var inputPanel = document.getElementById('clean-input-panel');
+        if (!panel || !inputPanel) {
+            return;
+        }
+        var gap = 0;
+        var margin = 12;
+        var inputRect = inputPanel.getBoundingClientRect();
+        var minSideWidth = Math.min(300, Math.max(240, window.innerWidth - (margin * 2)));
+        var previewWidth = Math.min(420, Math.max(minSideWidth, window.innerWidth - (margin * 2)));
+        var rightSpace = window.innerWidth - inputRect.right - margin;
+        var leftSpace = inputRect.left - margin;
+        var top = Math.max(margin, Math.min(inputRect.top, window.innerHeight - margin - Math.min(inputRect.height, window.innerHeight - (margin * 2))));
+        var left;
+
+        panel.style.maxWidth = 'calc(100vw - ' + (margin * 2) + 'px)';
+        panel.style.maxHeight = Math.max(260, Math.min(inputRect.height, window.innerHeight - (margin * 2))) + 'px';
+        panel.style.transform = 'none';
+        panel.style.right = 'auto';
+        panel.style.bottom = 'auto';
+        panel.style.borderColor = '#e5e7eb';
+        inputPanel.style.boxShadow = '0 20px 40px rgba(15, 23, 42, 0.16)';
+        panel.style.boxShadow = '8px 20px 40px rgba(15, 23, 42, 0.12)';
+
+        if (rightSpace >= minSideWidth) {
+            previewWidth = Math.min(420, rightSpace);
+            panel.style.width = previewWidth + 'px';
+            left = inputRect.right + gap;
+            inputPanel.style.borderTopLeftRadius = '12px';
+            inputPanel.style.borderBottomLeftRadius = '12px';
+            inputPanel.style.borderTopRightRadius = '0';
+            inputPanel.style.borderBottomRightRadius = '0';
+            panel.style.borderTopLeftRadius = '0';
+            panel.style.borderBottomLeftRadius = '0';
+            panel.style.borderTopRightRadius = '12px';
+            panel.style.borderBottomRightRadius = '12px';
+            panel.style.borderLeftColor = '#f3f4f6';
+        } else if (leftSpace >= minSideWidth) {
+            previewWidth = Math.min(420, leftSpace);
+            panel.style.width = previewWidth + 'px';
+            left = inputRect.left - previewWidth - gap;
+            inputPanel.style.borderTopLeftRadius = '0';
+            inputPanel.style.borderBottomLeftRadius = '0';
+            inputPanel.style.borderTopRightRadius = '12px';
+            inputPanel.style.borderBottomRightRadius = '12px';
+            panel.style.borderTopLeftRadius = '12px';
+            panel.style.borderBottomLeftRadius = '12px';
+            panel.style.borderTopRightRadius = '0';
+            panel.style.borderBottomRightRadius = '0';
+            panel.style.borderRightColor = '#f3f4f6';
+        } else {
+            previewWidth = Math.min(420, Math.max(240, window.innerWidth - (margin * 2)));
+            panel.style.width = previewWidth + 'px';
+            left = Math.max(margin, Math.min(inputRect.left, window.innerWidth - previewWidth - margin));
+            top = Math.min(window.innerHeight - margin - Math.min(320, window.innerHeight - (margin * 2)), inputRect.bottom + gap);
+            panel.style.maxHeight = Math.max(220, window.innerHeight - top - margin) + 'px';
+            inputPanel.style.borderTopLeftRadius = '12px';
+            inputPanel.style.borderTopRightRadius = '12px';
+            inputPanel.style.borderBottomLeftRadius = '0';
+            inputPanel.style.borderBottomRightRadius = '0';
+            panel.style.borderTopLeftRadius = '0';
+            panel.style.borderTopRightRadius = '0';
+            panel.style.borderBottomLeftRadius = '12px';
+            panel.style.borderBottomRightRadius = '12px';
+            panel.style.borderTopColor = '#f3f4f6';
+        }
+
+        panel.style.left = Math.round(left) + 'px';
+        panel.style.top = Math.round(top) + 'px';
+    }
+
+    function showCleanListPreviewPanel(items) {
+        addLogMessage('showCleanListPreviewPanel: displaying ' + items.length + ' items', 'log');
+        var existing = document.getElementById('clean-preview-panel');
+        if (existing && existing.parentNode) {
+            existing.parentNode.removeChild(existing);
+        }
+        var panel = document.createElement('div');
+        panel.id = 'clean-preview-panel';
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-modal', 'false');
+        panel.setAttribute('aria-labelledby', 'clean-preview-title');
+        panel.style.cssText = 'position: fixed; top: 50%; right: 24px; transform: translateY(-50%); width: 420px; max-width: calc(100vw - 48px); max-height: 82vh; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15); z-index: 20002; display: flex; flex-direction: column; overflow: hidden; pointer-events: auto;';
+
+        var header = document.createElement('div');
+        header.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 24px 24px 16px 24px; background: #ffffff; border-bottom: 1px solid #f3f4f6; flex-shrink: 0;';
+        var title = document.createElement('h4');
+        title.id = 'clean-preview-title';
+        title.textContent = 'Cleaned Responsibilities';
+        title.style.cssText = 'margin: 0; color: #111827; font-size: 18px; font-weight: 600; letter-spacing: 0.2px;';
+        var closeBtn = document.createElement('button');
+        closeBtn.textContent = '\u2715';
+        closeBtn.setAttribute('aria-label', 'Close cleaned list preview');
+        closeBtn.style.cssText = 'background: transparent; border: none; color: #6b7280; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: all 0.15s ease;';
+        closeBtn.onmouseover = function() { closeBtn.style.background = '#f3f4f6'; closeBtn.style.color = '#dc2626'; };
+        closeBtn.onmouseout = function() { closeBtn.style.background = 'transparent'; closeBtn.style.color = '#6b7280'; };
+        closeBtn.onclick = function() {
+            if (panel.parentNode) panel.parentNode.removeChild(panel);
+            resetCleanInputPanelShape();
+        };
+        header.appendChild(title);
+        header.appendChild(closeBtn);
+
+        var body = document.createElement('div');
+        body.style.cssText = 'padding: 16px 24px; overflow-y: auto; flex: 1; background: #ffffff;';
+        var list = document.createElement('ol');
+        list.style.cssText = 'margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 9px;';
+        var copyLines = [];
+        for (var i = 0; i < items.length; i++) {
+            var text = String(items[i].text || '').trim();
+            if (!text) continue;
+            var numbered = (i + 1) + '. ' + text;
+            copyLines.push(numbered);
+            var li = document.createElement('li');
+            li.textContent = text;
+            li.style.cssText = 'color: #111827; font-size: 14px; line-height: 1.45; word-break: break-word; padding-left: 2px;';
+            list.appendChild(li);
+        }
+        body.appendChild(list);
+
+        var footer = document.createElement('div');
+        footer.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 24px 24px 24px; background: #ffffff; border-top: 1px solid #f3f4f6; flex-shrink: 0;';
+        var count = document.createElement('div');
+        count.textContent = copyLines.length + ' item' + (copyLines.length === 1 ? '' : 's');
+        count.style.cssText = 'color: #6b7280; font-size: 12px; font-weight: 500;';
+        var copyBtn = document.createElement('button');
+        copyBtn.textContent = 'Copy';
+        copyBtn.style.cssText = 'background: #2563eb; border: 1px solid #2563eb; color: #ffffff; padding: 10px 18px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; letter-spacing: 0.2px; transition: all 0.15s ease;';
+        copyBtn.onmouseover = function() { copyBtn.style.background = '#1d4ed8'; copyBtn.style.borderColor = '#1d4ed8'; };
+        copyBtn.onmouseout = function() { copyBtn.style.background = '#2563eb'; copyBtn.style.borderColor = '#2563eb'; };
+        copyBtn.onclick = function() {
+            var textToCopy = copyLines.join('\n');
+            navigator.clipboard.writeText(textToCopy).then(function() {
+                copyBtn.textContent = 'Copied!';
+                var tid = setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1600);
+                cleanState.timeouts.push(tid);
+            }).catch(function(e) {
+                addLogMessage('showCleanListPreviewPanel: copy failed: ' + e, 'error');
+                copyBtn.textContent = 'Copy failed';
+                var tid2 = setTimeout(function() { copyBtn.textContent = 'Copy'; }, 1800);
+                cleanState.timeouts.push(tid2);
+            });
+        };
+        footer.appendChild(count);
+        footer.appendChild(copyBtn);
+
+        panel.appendChild(header);
+        panel.appendChild(body);
+        panel.appendChild(footer);
+        document.body.appendChild(panel);
+        positionCleanListPreviewPanel(panel);
+    }
+
     function showCleanInputPanel() {
         addLogMessage('showCleanInputPanel: creating input panel', 'log');
         var modal = document.createElement('div');
         modal.id = 'clean-input-modal';
         modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 20000; display: flex; align-items: center; justify-content: center;';
         var container = document.createElement('div');
+        container.id = 'clean-input-panel';
         container.style.cssText = 'background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 24px; width: 550px; max-width: 90%; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15); position: relative;';
         container.setAttribute('role', 'dialog');
         container.setAttribute('aria-modal', 'true');
@@ -7732,7 +8083,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         header.appendChild(title);
         header.appendChild(closeButton);
         var description = document.createElement('p');
-        description.textContent = 'Paste the raw responsibility list below. Items should start with a number followed by . or ) or = and text.';
+        description.textContent = 'Paste the raw responsibility list below. Items should start with a number followed by . or ) or = and text. Cleaned items will be inserted into empty Study Responsibilities fields on the DoA Template page.';
         description.style.cssText = 'color: #6b7280; margin: 0 0 12px 0; font-size: 14px; line-height: 1.4;';
         var textareaLabel = document.createElement('label');
         textareaLabel.setAttribute('for', 'clean-input-textarea');
@@ -7753,15 +8104,25 @@ function showResponsibilitiesProgressPanel(rolesData) {
         confirmButton.disabled = true;
         confirmButton.setAttribute('aria-label', 'Confirm and parse responsibilities');
         confirmButton.style.cssText = 'background: #22c55e; border: 1px solid #22c55e; color: #ffffff; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; letter-spacing: 0.2px; transition: all 0.15s ease; opacity: 0.5;';
+        var displayButton = document.createElement('button');
+        displayButton.textContent = 'Display Clean List';
+        displayButton.disabled = true;
+        displayButton.setAttribute('aria-label', 'Display cleaned responsibility list');
+        displayButton.style.cssText = 'background: #eff6ff; border: 1px solid #bfdbfe; color: #2563eb; padding: 10px 18px; border-radius: 8px; cursor: not-allowed; font-size: 14px; font-weight: 600; transition: all 0.15s ease; opacity: 0.5;';
         var updateConfirmState = function() {
             var hasInput = textarea.value.trim().length > 0;
             confirmButton.disabled = !hasInput;
+            displayButton.disabled = !hasInput;
             if (hasInput) {
                 confirmButton.style.opacity = '1';
                 confirmButton.style.cursor = 'pointer';
+                displayButton.style.opacity = '1';
+                displayButton.style.cursor = 'pointer';
             } else {
                 confirmButton.style.opacity = '0.5';
                 confirmButton.style.cursor = 'not-allowed';
+                displayButton.style.opacity = '0.5';
+                displayButton.style.cursor = 'not-allowed';
             }
         };
         textarea.addEventListener('input', updateConfirmState);
@@ -7774,7 +8135,42 @@ function showResponsibilitiesProgressPanel(rolesData) {
         confirmButton.onmouseout = function() {
             confirmButton.style.background = '#22c55e'; confirmButton.style.borderColor = '#22c55e';
         };
-        confirmButton.onclick = function() {
+        displayButton.onmouseover = function() {
+            if (!displayButton.disabled) {
+                displayButton.style.background = '#dbeafe';
+                displayButton.style.borderColor = '#93c5fd';
+            }
+        };
+        displayButton.onmouseout = function() {
+            displayButton.style.background = '#eff6ff';
+            displayButton.style.borderColor = '#bfdbfe';
+        };
+        displayButton.onclick = function() {
+            if (displayButton.disabled) {
+                return;
+            }
+            addLogMessage('showCleanInputPanel: Display Clean List clicked', 'log');
+            var rawText = textarea.value;
+            if (!rawText || !rawText.trim()) {
+                return;
+            }
+            var parseResult = parseAndCleanResponsibilities(rawText);
+            if (parseResult.items.length === 0) {
+                var notice = document.createElement('div');
+                notice.textContent = 'No numbered items found. Ensure items start with a number followed by . or ) or = and text.';
+                notice.style.cssText = 'background: #fef3c7; border-left: 4px solid #f59e0b; color: #92400e; font-size: 13px; margin-top: 8px; padding: 8px 12px; border-radius: 6px;';
+                notice.setAttribute('role', 'alert');
+                var existingNotice = container.querySelector('[role="alert"]');
+                if (existingNotice) {
+                    container.removeChild(existingNotice);
+                }
+                container.appendChild(notice);
+                return;
+            }
+            cleanState.parsedItems = parseResult;
+            showCleanListPreviewPanel(parseResult.items);
+        };
+        confirmButton.onclick = async function() {
             if (confirmButton.disabled) {
                 return;
             }
@@ -7799,12 +8195,38 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 return;
             }
             cleanState.parsedItems = parseResult;
-            var outputModel = buildOutputModel(parseResult.items);
-            cleanState.outputModel = outputModel;
-            if (modal.parentNode) {
-                modal.parentNode.removeChild(modal);
+            confirmButton.disabled = true;
+            confirmButton.style.opacity = '0.5';
+            confirmButton.style.cursor = 'not-allowed';
+            confirmButton.textContent = 'Inserting...';
+            var existingNotice2 = container.querySelector('[role="alert"]');
+            if (existingNotice2) {
+                container.removeChild(existingNotice2);
             }
-            showCleanResultsPanel(outputModel);
+            try {
+                var inserted = await insertCleanResponsibilitiesIntoDoaTemplate(parseResult.items);
+                addLogMessage('showCleanInputPanel: inserted ' + inserted + ' Study Responsibilities', 'log');
+                var successNotice = document.createElement('div');
+                successNotice.textContent = 'Inserted ' + inserted + ' Study Responsibilities.';
+                successNotice.style.cssText = 'background: #dcfce7; border-left: 4px solid #16a34a; color: #166534; font-size: 13px; margin-top: 8px; padding: 8px 12px; border-radius: 6px;';
+                successNotice.setAttribute('role', 'alert');
+                container.appendChild(successNotice);
+                var closeTid = setTimeout(function() {
+                    stopCleanResponsibility();
+                }, 1200);
+                cleanState.timeouts.push(closeTid);
+            } catch (e) {
+                addLogMessage('showCleanInputPanel: insertion failed: ' + e, 'error');
+                var failNotice = document.createElement('div');
+                failNotice.textContent = e && e.message ? e.message : 'Unable to insert Study Responsibilities.';
+                failNotice.style.cssText = 'background: #fee2e2; border-left: 4px solid #dc2626; color: #991b1b; font-size: 13px; margin-top: 8px; padding: 8px 12px; border-radius: 6px;';
+                failNotice.setAttribute('role', 'alert');
+                container.appendChild(failNotice);
+                confirmButton.textContent = CLEAN_LABELS.confirm;
+                confirmButton.disabled = false;
+                confirmButton.style.opacity = '1';
+                confirmButton.style.cursor = 'pointer';
+            }
         };
         var clearButton = document.createElement('button');
         clearButton.textContent = CLEAN_LABELS.clear;
@@ -7821,12 +8243,18 @@ function showResponsibilitiesProgressPanel(rolesData) {
             textarea.value = '';
             cleanState.parsedItems = null;
             cleanState.outputModel = null;
+            var previewPanel = document.getElementById('clean-preview-panel');
+            if (previewPanel && previewPanel.parentNode) {
+                previewPanel.parentNode.removeChild(previewPanel);
+            }
+            resetCleanInputPanelShape();
             updateConfirmState();
             textarea.focus();
         };
         var buttonContainer = document.createElement('div');
-        buttonContainer.style.cssText = 'display: flex; gap: 12px; margin-top: 20px; justify-content: flex-end;';
+        buttonContainer.style.cssText = 'display: flex; gap: 12px; margin-top: 20px; justify-content: flex-end; flex-wrap: wrap;';
         buttonContainer.appendChild(clearButton);
+        buttonContainer.appendChild(displayButton);
         buttonContainer.appendChild(confirmButton);
         var ariaLiveRegion = document.createElement('div');
         ariaLiveRegion.id = 'clean-aria-live';
@@ -7846,8 +8274,20 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
+        makeDraggable(container, header, function() {
+            positionCleanListPreviewPanel(document.getElementById('clean-preview-panel'));
+        });
         document.body.appendChild(modal);
+        var cleanPreviewResizeHandler = function() {
+            var previewPanel = document.getElementById('clean-preview-panel');
+            if (!previewPanel) {
+                window.removeEventListener('resize', cleanPreviewResizeHandler);
+                return;
+            }
+            positionCleanListPreviewPanel(previewPanel);
+        };
+        window.addEventListener('resize', cleanPreviewResizeHandler);
+        cleanState.eventListeners.push({ element: window, type: 'resize', handler: cleanPreviewResizeHandler });
         textarea.focus();
         addLogMessage('showCleanInputPanel: panel displayed', 'log');
         var escHandler = function(e) {
@@ -8084,6 +8524,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var rm = document.getElementById('clean-results-modal');
         if (rm && rm.parentNode) {
             rm.parentNode.removeChild(rm);
+        }
+        var preview = document.getElementById('clean-preview-panel');
+        if (preview && preview.parentNode) {
+            preview.parentNode.removeChild(preview);
         }
         if (cleanState.focusReturnElement) {
             cleanState.focusReturnElement.focus();
@@ -10614,6 +11058,21 @@ function showResponsibilitiesProgressPanel(rolesData) {
         };
         header.appendChild(titleContainer);
         header.appendChild(closeButton);
+        var processingStrip = document.createElement('div');
+        processingStrip.id = 'cb-select-processing-strip';
+        processingStrip.setAttribute('role', 'status');
+        processingStrip.setAttribute('aria-live', 'polite');
+        processingStrip.style.cssText = 'display: none; align-items: center; gap: 10px; padding: 10px 12px; margin-bottom: 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; color: #1e40af; font-size: 13px; font-weight: 500; flex-shrink: 0;';
+        var spinner = document.createElement('span');
+        spinner.style.cssText = 'width: 16px; height: 16px; border: 2px solid #bfdbfe; border-top-color: #2563eb; border-radius: 50%; display: inline-block; animation: florence-cb-spin 0.8s linear infinite; flex-shrink: 0;';
+        var spinnerStyle = document.createElement('style');
+        spinnerStyle.textContent = '@keyframes florence-cb-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }';
+        processingStrip.appendChild(spinnerStyle);
+        processingStrip.appendChild(spinner);
+        var processingText = document.createElement('span');
+        processingText.id = 'cb-select-processing-text';
+        processingText.textContent = 'Preparing selection...';
+        processingStrip.appendChild(processingText);
         var panelsContainer = document.createElement('div');
         panelsContainer.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; overflow: hidden;';
         var leftPanel = createSubpanel('Scanned Log Entries', 'cb-select-left-panel', 'cb-select-left-search');
@@ -10654,6 +11113,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         ariaLiveRegion.setAttribute('aria-atomic', 'true');
         ariaLiveRegion.style.cssText = 'position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;';
         container.appendChild(header);
+        container.appendChild(processingStrip);
         container.appendChild(panelsContainer);
         container.appendChild(summaryFooter);
         container.appendChild(ariaLiveRegion);
@@ -11045,6 +11505,28 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function cbSetProcessingIndicator(message, visible) {
+        var strip = document.getElementById('cb-select-processing-strip');
+        var text = document.getElementById('cb-select-processing-text');
+        if (!strip) {
+            return;
+        }
+        if (text && message) {
+            text.textContent = message;
+        }
+        strip.style.display = visible ? 'flex' : 'none';
+        if (message) {
+            cbUpdateAriaLive(message);
+        }
+    }
+
+    function cbAfterNextPaint(callback) {
+        requestAnimationFrame(function() {
+            var tid = setTimeout(callback, 0);
+            cbSelectState.timeouts.push(tid);
+        });
+    }
+
     function cbSetAriaBusyOn() {
         var target = document.querySelector(CB_SELECT_ATTRS.ariaBusyTarget);
         if (target) {
@@ -11105,18 +11587,38 @@ function showResponsibilitiesProgressPanel(rolesData) {
             callback([]);
             return;
         }
-        for (var ci = 0; ci < batchTargets.length; ci++) {
-            try {
-                if (!batchTargets[ci].checkboxEl.disabled && batchTargets[ci].checkboxEl.getAttribute('aria-disabled') !== 'true') {
-                    batchTargets[ci].checkboxEl.click();
-                    batchClickCount++;
-                }
-            } catch (err) {
-                addLogMessage('tryBatchSelect: click error on index ' + ci + ': ' + err, 'warn');
+        cbSetProcessingIndicator('Selecting checkboxes in batches...', true);
+        var clickIndex = 0;
+        var chunkSize = 40;
+        function clickNextChunk() {
+            if (cbSelectState.stopRequested || !cbSelectState.isRunning) {
+                callback(batchTargets.slice(clickIndex));
+                return;
             }
+            var end = Math.min(clickIndex + chunkSize, batchTargets.length);
+            for (var ci = clickIndex; ci < end; ci++) {
+                try {
+                    if (!batchTargets[ci].checkboxEl.disabled && batchTargets[ci].checkboxEl.getAttribute('aria-disabled') !== 'true') {
+                        batchTargets[ci].checkboxEl.click();
+                        batchClickCount++;
+                    }
+                } catch (err) {
+                    addLogMessage('tryBatchSelect: click error on index ' + ci + ': ' + err, 'warn');
+                }
+            }
+            clickIndex = end;
+            cbSetProcessingIndicator('Selecting checkboxes ' + clickIndex + ' of ' + batchTargets.length + '...', true);
+            if (clickIndex < batchTargets.length) {
+                var chunkTid = setTimeout(clickNextChunk, 0);
+                cbSelectState.timeouts.push(chunkTid);
+                return;
+            }
+            verifyBatchSelection();
         }
-        addLogMessage('tryBatchSelect: clicked ' + batchClickCount + ' checkboxes, waiting for settle', 'log');
-        var settleTid = setTimeout(function() {
+        function verifyBatchSelection() {
+            addLogMessage('tryBatchSelect: clicked ' + batchClickCount + ' checkboxes, waiting for settle', 'log');
+            cbSetProcessingIndicator('Verifying selected checkboxes...', true);
+            var settleTid = setTimeout(function() {
             var successCount = 0;
             var failedTargets = [];
             for (var vi = 0; vi < batchTargets.length; vi++) {
@@ -11144,15 +11646,23 @@ function showResponsibilitiesProgressPanel(rolesData) {
             cbUpdateRightPanelSummary();
             addLogMessage('tryBatchSelect: batch result - success=' + successCount + ' failed=' + failedTargets.length, 'log');
             callback(failedTargets);
-        }, 600);
-        cbSelectState.timeouts.push(settleTid);
+            }, 600);
+            cbSelectState.timeouts.push(settleTid);
+        }
+        clickNextChunk();
     }
     
     function beginCheckboxSelectionRun() {
         addLogMessage('beginCheckboxSelectionRun: starting scan', 'log');
         openCheckboxSelectProgressPanel();
+        cbSetProcessingIndicator(cbSelectState.selectAllOn ? 'Preparing Select All. The page is processing...' : 'Preparing checkbox selection...', true);
+        cbAfterNextPaint(beginCheckboxSelectionRunCore);
+    }
+
+    function beginCheckboxSelectionRunCore() {
         cbSetAriaBusyOn();
         cbUpdateAriaLive('Scan started');
+        cbSetProcessingIndicator('Scanning visible log entries...', true);
         if (!cbSelectState.selectAllOn) {
             var rightPanel = document.getElementById('cb-select-right-panel');
             if (rightPanel) {
@@ -11280,6 +11790,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
         function finishScan(reason) {
             addLogMessage('beginCheckboxSelectionRun: scan done reason=' + reason + ' scanned=' + cbSelectState.scannedRows.length, 'log');
+            cbSetProcessingIndicator('Preparing checkbox selection list...', true);
             cbUpdateAriaLive('Scan complete, found ' + cbSelectState.scannedRows.length + ' rows');
             var targets = enqueueTargets(cbSelectState.selectAllOn, cbSelectState.parsedNames, cbSelectState.scannedRows);
             cbSelectState.targets = targets;
@@ -11319,6 +11830,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             if (pendingCount > 0) {
                 addLogMessage('beginCheckboxSelectionRun: starting batch selection for ' + pendingCount + ' entries', 'log');
+                cbSetProcessingIndicator('Starting batch selection for ' + pendingCount + ' entries...', true);
                 cbUpdateAriaLive('Attempting batch checkbox selection for ' + pendingCount + ' entries');
                 tryBatchSelect(targets, function(failedTargets) {
                     if (failedTargets.length === 0) {
@@ -11415,6 +11927,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 badge.style.color = '#15803d';
                 badge.style.background = '#dcfce7';
             }
+            cbSetProcessingIndicator('', false);
             var titleEl = document.getElementById('cb-select-progress-title');
             if (titleEl) {
                 titleEl.textContent = CB_SELECT_LABELS.progressTitle + ' - Complete';
@@ -18820,8 +19333,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
     const TLOG_TAB_STORAGE_KEY = 'florence_selected_tab';
     const TLOG_ACTIVE_STORAGE_KEY = 'florence_training_log_active';
     const TLOG_STAFF_PIS_STORAGE_KEY = 'florence_training_log_staff_pis_v1';
+    const TLOG_STAFF_NON_PI_STORAGE_KEY = 'florence_training_log_staff_non_pi_v1';
     const TLOG_STAFF_NON_PI_SESSION_KEY = 'florence_training_log_staff_non_pi_session_v1';
     const STUDY_LIBRARY_STORAGE_KEY = 'florence_study_library_v1';
+    const STUDY_LIBRARY_BACKUP_STORAGE_KEY = 'florence_study_library_backup_v1';
     const STUDY_LIBRARY_DATA_VERSION = 1;
     const TLOG_LATEST_STORAGE_KEY = 'florence_latest_training_log_v1';
     const TLOG_PERSISTENCE_DEFAULT = {
@@ -18871,7 +19386,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     const BUTTON_DEFS = [
         { id: 'add-signatures-btn', label: 'Add Signatures', handler: function() { startAddSignaturesFlow(); } },
         { id: 'elog-staff-entries-btn', label: 'Add Training Log Staff Entries', handler: function() { addELogStaffEntriesInit(); } },
-        { id: 'clean-resp-btn', label: 'Clean Task List', handler: function() { cleanResponsibilityInit(); } },
+        { id: 'clean-resp-btn', label: 'Add Study Resp. (DoA Template)', handler: function() { cleanResponsibilityInit(); } },
         { id: 'doa-staff-entries-btn', label: 'Add DoA Log Staff Entries', handler: function() { addDoALogStaffEntriesInit(); } },
         { id: 'resp-set-btn', label: 'Set Role Resp.', handler: function() { setResponsibilitiesInit(); } },
         { id: 'cb-select-btn', label: 'Select Checkboxes', handler: function() { selectCheckboxesInit(); } },
@@ -20062,7 +20577,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
         document.body.appendChild(modal);
     }
-    function makeDraggable(container, handle) {
+    function makeDraggable(container, handle, onMove) {
         let isDraggingModal = false;
         let offsetX = 0;
         let offsetY = 0;
@@ -20126,10 +20641,16 @@ function showResponsibilitiesProgressPanel(rolesData) {
             } else {
                 container.style.transform = 'none';
             }
+            if (typeof onMove === 'function') {
+                onMove();
+            }
         });
 
         document.addEventListener('mouseup', function() {
             isDraggingModal = false;
+            if (typeof onMove === 'function') {
+                onMove();
+            }
         });
     }
 
@@ -20213,7 +20734,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         });
     }
 
-    function normalizeTrainingLogStaffListState(data) {
+    function normalizeTrainingLogStaffListState(data, nonPiText) {
         var normalized = { pis: [], selectedPi: '', nonPiText: '' };
         if (data && typeof data === 'object') {
             if (Array.isArray(data.pis)) {
@@ -20228,11 +20749,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             normalized.selectedPi = String(data.selectedPi || '').replace(/\s+/g, ' ').trim();
         }
-        try {
-            normalized.nonPiText = sessionStorage.getItem(TLOG_STAFF_NON_PI_SESSION_KEY) || '';
-        } catch (e) {
-            normalized.nonPiText = '';
-        }
+        normalized.nonPiText = String(nonPiText || '');
         if (normalized.selectedPi && normalized.pis.indexOf(normalized.selectedPi) === -1) {
             normalized.selectedPi = '';
         }
@@ -20240,11 +20757,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function loadTrainingLogStaffListState() {
-        return florenceStorageGet(TLOG_STAFF_PIS_STORAGE_KEY).then(function(result) {
-            trainingLogState.staffList = normalizeTrainingLogStaffListState(result ? result[TLOG_STAFF_PIS_STORAGE_KEY] : null);
+        return florenceStorageGet([TLOG_STAFF_PIS_STORAGE_KEY, TLOG_STAFF_NON_PI_STORAGE_KEY]).then(function(result) {
+            var nonPiText = result ? result[TLOG_STAFF_NON_PI_STORAGE_KEY] : '';
+            if (!nonPiText) {
+                try {
+                    nonPiText = sessionStorage.getItem(TLOG_STAFF_NON_PI_SESSION_KEY) || '';
+                } catch (e) {
+                    nonPiText = '';
+                }
+                if (nonPiText) {
+                    var migrationPayload = {};
+                    migrationPayload[TLOG_STAFF_NON_PI_STORAGE_KEY] = nonPiText;
+                    florenceStorageSet(migrationPayload).catch(function(err) {
+                        addLogMessage('loadTrainingLogStaffListState: non-PI migration failed: ' + err, 'warn');
+                    });
+                }
+            }
+            trainingLogState.staffList = normalizeTrainingLogStaffListState(result ? result[TLOG_STAFF_PIS_STORAGE_KEY] : null, nonPiText);
         }).catch(function(e) {
             addLogMessage('loadTrainingLogStaffListState: failed: ' + e, 'error');
-            trainingLogState.staffList = normalizeTrainingLogStaffListState(null);
+            trainingLogState.staffList = normalizeTrainingLogStaffListState(null, '');
         });
     }
 
@@ -20263,11 +20795,13 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     function saveTrainingLogStaffListNonPi(text) {
         trainingLogState.staffList.nonPiText = String(text || '');
-        try {
-            sessionStorage.setItem(TLOG_STAFF_NON_PI_SESSION_KEY, trainingLogState.staffList.nonPiText);
-        } catch (e) {
+        var payload = {};
+        payload[TLOG_STAFF_NON_PI_STORAGE_KEY] = trainingLogState.staffList.nonPiText;
+        return florenceStorageSet(payload).catch(function(e) {
             addLogMessage('saveTrainingLogStaffListNonPi: failed: ' + e, 'error');
-        }
+            florenceShowStorageError('Non-PI staff list save failed: ' + e.message);
+            throw e;
+        });
     }
 
     function migrateStudy(study) {
@@ -20297,6 +20831,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (!data.version) {
             data.version = STUDY_LIBRARY_DATA_VERSION;
         }
+        if (!data.savedAt) {
+            data.savedAt = 0;
+        }
         if (!Array.isArray(data.studies)) {
             data.studies = [];
         }
@@ -20306,15 +20843,73 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return data;
     }
 
+    function getStudyLibraryBackup() {
+        try {
+            var raw = localStorage.getItem(STUDY_LIBRARY_BACKUP_STORAGE_KEY);
+            if (!raw) return null;
+            return migrateStudyLibrary(JSON.parse(raw));
+        } catch (e) {
+            addLogMessage('getStudyLibraryBackup: failed: ' + e, 'warn');
+            return null;
+        }
+    }
+
+    function saveStudyLibraryBackup(data) {
+        try {
+            localStorage.setItem(STUDY_LIBRARY_BACKUP_STORAGE_KEY, JSON.stringify(data));
+            addLogMessage('saveStudyLibraryBackup: saved backup with ' + data.studies.length + ' studies', 'log');
+            return true;
+        } catch (e) {
+            addLogMessage('saveStudyLibraryBackup: failed: ' + e, 'warn');
+            return false;
+        }
+    }
+
+    function chooseStudyLibraryData(primaryData, backupData) {
+        var primary = migrateStudyLibrary(primaryData);
+        var backup = backupData ? migrateStudyLibrary(backupData) : null;
+        if (!backup) return { data: primary, recovered: false };
+        var primaryCount = primary.studies.length;
+        var backupCount = backup.studies.length;
+        if (primaryCount === 0 && backupCount > 0) {
+            return { data: backup, recovered: true };
+        }
+        if (primary.savedAt && backup.savedAt && backup.savedAt > primary.savedAt && backupCount >= primaryCount) {
+            return { data: backup, recovered: true };
+        }
+        return { data: primary, recovered: false };
+    }
+
     function loadStudyLibrary() {
         return florenceStorageGet(STUDY_LIBRARY_STORAGE_KEY).then(function(result) {
-            var data = migrateStudyLibrary(result ? result[STUDY_LIBRARY_STORAGE_KEY] : null);
+            var primaryData = result ? result[STUDY_LIBRARY_STORAGE_KEY] : null;
+            var chosen = chooseStudyLibraryData(primaryData, getStudyLibraryBackup());
+            var data = chosen.data;
             studyLibraryState.studies = data.studies || [];
             studyLibraryState.loaded = true;
             studyLibraryState.loadError = null;
             florenceHideStorageError();
+            if (chosen.recovered) {
+                addLogMessage('loadStudyLibrary: recovered ' + studyLibraryState.studies.length + ' studies from local backup', 'warn');
+                var recoveryPayload = {};
+                recoveryPayload[STUDY_LIBRARY_STORAGE_KEY] = data;
+                florenceStorageSet(recoveryPayload).catch(function(e) {
+                    addLogMessage('loadStudyLibrary: failed to re-save recovered library: ' + e, 'warn');
+                });
+            } else if (studyLibraryState.studies.length > 0) {
+                saveStudyLibraryBackup(data);
+            }
             addLogMessage('loadStudyLibrary: loaded ' + studyLibraryState.studies.length + ' studies', 'log');
         }).catch(function(e) {
+            var backup = getStudyLibraryBackup();
+            if (backup && backup.studies.length > 0) {
+                studyLibraryState.studies = backup.studies || [];
+                studyLibraryState.loaded = true;
+                studyLibraryState.loadError = null;
+                florenceShowStorageError('Study Library restored from browser backup because extension storage failed.');
+                addLogMessage('loadStudyLibrary: restored from backup after storage failure: ' + e, 'warn');
+                return;
+            }
             studyLibraryState.loaded = true;
             studyLibraryState.loadError = e;
             florenceShowStorageError('Study Library storage failed: ' + e.message);
@@ -20325,14 +20920,17 @@ function showResponsibilitiesProgressPanel(rolesData) {
     function saveStudyLibrary() {
         var data = {
             version: STUDY_LIBRARY_DATA_VERSION,
+            savedAt: Date.now(),
             studies: studyLibraryState.studies
         };
         var payload = {};
         payload[STUDY_LIBRARY_STORAGE_KEY] = data;
         return florenceStorageSet(payload).then(function() {
+            saveStudyLibraryBackup(data);
             florenceHideStorageError();
             addLogMessage('saveStudyLibrary: saved ' + data.studies.length + ' studies', 'log');
         }).catch(function(e) {
+            saveStudyLibraryBackup(data);
             florenceShowStorageError('Study Library save failed: ' + e.message);
             addLogMessage('saveStudyLibrary: failed: ' + e, 'error');
             throw e;
@@ -20463,7 +21061,17 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
         if (!text) return null;
         text = text.replace(/^\s*Legend\s*[\r\n]+/i, '').trim();
-        return text || null;
+        return normalizeExtractedLegendText(text);
+    }
+
+    function normalizeExtractedLegendText(text) {
+        text = String(text || '').replace(/\r\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+        if (!text) return null;
+        var compact = text.replace(/\s+/g, ' ').trim().toLowerCase();
+        if (!compact || compact === 'legend' || compact === 'legends') return null;
+        if (/^no\s+legend(s)?\s+(available|found|configured)\.?$/i.test(compact)) return null;
+        if (/^no\s+data\s+(available|found)\.?$/i.test(compact)) return null;
+        return text;
     }
 
     function waitForLegendElement(timeoutMs) {
@@ -20499,6 +21107,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function savePersistedLegend(legendText) {
+        legendText = normalizeExtractedLegendText(legendText);
         if (!legendText) return;
         if (legendText === trainingLogState.persisted.legends) return;
         trainingLogState.persisted.legends = legendText;
@@ -20544,7 +21153,15 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function fetchLegendFromTrainingLog(log) {
-        if (!log || !log.href) return Promise.resolve(false);
+        if (!log || !log.href) {
+            var currentLegend = extractLegendText();
+            if (currentLegend) {
+                savePersistedLegend(currentLegend);
+                addLogMessage('Training Log: legend pulled from current opened log', 'log');
+                return Promise.resolve(true);
+            }
+            return Promise.resolve(false);
+        }
         var url = resolveTrainingLogHref(log.href);
         if (!url) return Promise.resolve(false);
         addLogMessage('Training Log: fetching latest log for legend: ' + url, 'log');
@@ -20820,9 +21437,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return !!container;
     }
 
-    function findBestTrainingLog() {
-        var candidates = [];
-        var seen = new Set();
+    function tlogSleep(ms) {
+        return new Promise(function(resolve) {
+            setTimeout(resolve, ms);
+        });
+    }
+
+    function addRenderedTrainingLogCandidates(candidates, seen, startIndex) {
+        var indexBase = typeof startIndex === 'number' ? startIndex : 0;
         var rows = document.querySelectorAll('[role="row"].folder-show__item--loaded, [role="row"]');
         for (var ri = 0; ri < rows.length; ri++) {
             var row = rows[ri];
@@ -20835,7 +21457,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             var rowKey = rowHref || rowText;
             if (!rowKey || seen.has(rowKey)) continue;
             seen.add(rowKey);
-            var rowCand = buildTrainingLogCandidate(rowText, rowLink, ri, getTrainingLogRowDateInfo(row));
+            var rowCand = buildTrainingLogCandidate(rowText, rowLink, indexBase + ri, getTrainingLogRowDateInfo(row));
             if (!rowCand) continue;
             candidates.push(rowCand);
         }
@@ -20850,10 +21472,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
             var key = href || text;
             if (!key || seen.has(key)) continue;
             seen.add(key);
-            var cand = buildTrainingLogCandidate(text, el, rows.length + i, getTrainingLogRowDateInfo(el.closest('[role="row"]')));
+            var cand = buildTrainingLogCandidate(text, el, indexBase + rows.length + i, getTrainingLogRowDateInfo(el.closest('[role="row"]')));
             if (!cand) continue;
             candidates.push(cand);
         }
+        return candidates.length;
+    }
+
+    function rankTrainingLogCandidates(candidates) {
         if (candidates.length === 0) return null;
         candidates.sort(function(a, b) {
             var aStudyScore = getTrainingLogStudyMatchScore(a);
@@ -20865,6 +21491,69 @@ function showResponsibilitiesProgressPanel(rolesData) {
             return a.index - b.index;
         });
         return candidates[0];
+    }
+
+    function findBestTrainingLog() {
+        var candidates = [];
+        var seen = new Set();
+        addRenderedTrainingLogCandidates(candidates, seen, 0);
+        return rankTrainingLogCandidates(candidates);
+    }
+
+    function getTrainingLogVirtualScrollViewports() {
+        var viewports = [];
+        var nodes = document.querySelectorAll('cdk-virtual-scroll-viewport, .cdk-virtual-scroll-viewport');
+        for (var i = 0; i < nodes.length; i++) {
+            var viewport = nodes[i];
+            if (!isElementTlogVisible(viewport)) continue;
+            if (isInsideDocumentContent(viewport)) continue;
+            if (viewport.scrollHeight <= viewport.clientHeight + 10) continue;
+            var text = (viewport.textContent || '').toLowerCase();
+            var hasDocumentLinks = !!viewport.querySelector('a[href*="/documents/"], [role="row"]');
+            var looksLikeDocumentList = hasDocumentLinks || text.indexOf('version') !== -1 || text.indexOf('modified') !== -1;
+            if (!looksLikeDocumentList) continue;
+            viewports.push(viewport);
+        }
+        return viewports;
+    }
+
+    async function findBestTrainingLogWithVirtualScroll() {
+        var candidates = [];
+        var seen = new Set();
+        var indexBase = 0;
+        addRenderedTrainingLogCandidates(candidates, seen, indexBase);
+        var viewports = getTrainingLogVirtualScrollViewports();
+        for (var v = 0; v < viewports.length; v++) {
+            var viewport = viewports[v];
+            var originalTop = viewport.scrollTop;
+            var maxSteps = 28;
+            var stagnantSteps = 0;
+            var lastTop = -1;
+            try {
+                for (var step = 0; step < maxSteps; step++) {
+                    indexBase += 1000;
+                    var beforeCount = candidates.length;
+                    addRenderedTrainingLogCandidates(candidates, seen, indexBase);
+                    var atBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 8;
+                    if (atBottom) break;
+                    var nextTop = Math.min(viewport.scrollTop + Math.max(viewport.clientHeight - 60, 240), viewport.scrollHeight);
+                    viewport.scrollTop = nextTop;
+                    viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+                    await tlogSleep(220);
+                    if (Math.abs(viewport.scrollTop - lastTop) < 4 && candidates.length === beforeCount) {
+                        stagnantSteps++;
+                    } else {
+                        stagnantSteps = 0;
+                    }
+                    lastTop = viewport.scrollTop;
+                    if (stagnantSteps >= 3) break;
+                }
+            } finally {
+                viewport.scrollTop = originalTop;
+                viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
+            }
+        }
+        return rankTrainingLogCandidates(candidates);
     }
 
     function getTrainingLogStudyMatchScore(candidate) {
@@ -21137,22 +21826,37 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return false;
     }
 
+    function isTrainingLogFieldEmpty(field) {
+        return !field || normalizeTlogModalText(field.value || '') === '';
+    }
+
+    function setTrainingLogFieldOnce(field, value) {
+        if (!field || !value) return false;
+        if (field.getAttribute('data-florence-tlog-autofilled') === 'true') return false;
+        if (!isTrainingLogFieldEmpty(field)) return false;
+        field.setAttribute('data-florence-tlog-autofilled', 'true');
+        setFlorenceNativeValue(field, value);
+        return true;
+    }
+
     function fillCreateLogModal(modal) {
         var logName = trainingLogState.persisted && trainingLogState.persisted.todaysLogName;
         if (!logName) return;
         var nameInput = modal.querySelector('#name-input, input[name="name"], .test-logNameInput') || findInputByLabelText(modal, 'Name (this can be changed later)');
-        if (nameInput && nameInput.value !== logName) {
-            setFlorenceNativeValue(nameInput, logName);
+        if (setTrainingLogFieldOnce(nameInput, logName)) {
             addLogMessage('Training Log: filled Create Log name', 'log');
         }
         var templateName = chooseTrainingLogTemplateName(logName);
         if (!templateName) return;
         var templateInput = modal.querySelector('.filtered-select input[role="combobox"], input[role="combobox"]');
-        if (templateInput && normalizeTlogModalText(templateInput.value) === templateName) return;
-        if (templateInput && templateInput.value !== templateName) {
-            setFlorenceNativeValue(templateInput, templateName);
-            templateInput.focus();
-        }
+        if (!templateInput) return;
+        if (templateInput.getAttribute('data-florence-template-autofilled') === 'true') return;
+        if (templateInput.getAttribute('data-florence-tlog-autofilled') === 'true') return;
+        if (!isTrainingLogFieldEmpty(templateInput)) return;
+        templateInput.setAttribute('data-florence-template-autofilled', 'true');
+        templateInput.setAttribute('data-florence-tlog-autofilled', 'true');
+        setFlorenceNativeValue(templateInput, templateName);
+        templateInput.focus();
         var toggle = modal.querySelector('.filtered-select .test-caret, button[aria-label="Toggle dropdown"]');
         if (toggle) toggle.click();
         setTimeout(function() {
@@ -21180,8 +21884,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (!mapping.value) continue;
             var input = findInputByAnyLabelText(modal, mapping.labels);
             if (!input) continue;
-            if (input.value !== String(mapping.value)) {
-                setFlorenceNativeValue(input, mapping.value);
+            if (setTrainingLogFieldOnce(input, mapping.value)) {
                 filled++;
             }
         }
@@ -21193,8 +21896,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (!legend) return;
         var textarea = modal.querySelector('textarea#legend, textarea.test-metadataInput, textarea');
         if (!textarea) return;
-        if (textarea.value !== legend) {
-            setFlorenceNativeValue(textarea, legend);
+        if (setTrainingLogFieldOnce(textarea, legend)) {
             addLogMessage('Training Log: filled Edit Log Legend', 'log');
         }
     }
@@ -21272,7 +21974,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             {
                 title: 'Task & Responsibility Management',
                 features: [
-                    { label: 'Clean Task List', desc: 'Clean up the pasted task list by trimming extra spacing, replacing "and" with "&", removing all special characters like & or /, etc.' },
+                    { label: 'Add Study Resp. (DoA Template)', desc: 'Cleans a pasted numbered responsibility list, switches the DoA Template Study Responsibilities step to Numbers, and inserts each item into empty fields.' },
                     { label: 'Select Checkboxes', desc: 'Automatically selects specified checkboxes on the current page based on criteria you provide, or bulk select all.' }
                 ]
             },
@@ -22162,14 +22864,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
-    function florenceTlogRunScan() {
+    async function florenceTlogRunScan() {
         if (trainingLogState.scanning) return;
         trainingLogState.scanning = true;
         trainingLogState.legendWaiting = false;
         setTlogStatus('scanning', 'Scanning...');
         try {
             var log = findTrainingLogFromDocumentTitle();
-            if (!log) log = findBestTrainingLog();
+            if (!log) log = await findBestTrainingLogWithVirtualScroll();
             trainingLogState.latestLog = log;
             if (log) {
                 addLogMessage('Training Log matched: ' + log.text + ' (date: ' + log.date.toDateString() + ')', 'log');
@@ -22194,18 +22896,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     saveLatestTrainingLogPersisted(trainingLogState.persisted).then(function() {
                         addLogMessage('Training Log: persisted latest log', 'log');
                         scheduleTrainingLogModalAutofill();
-                        fetchLegendFromTrainingLog(log).then(function(found) {
-                            if (!found) tryExtractLegend();
-                        });
+                        fetchLegendFromTrainingLog(log);
                     }).catch(function(e) {
                         addLogMessage('Training Log: persist failed: ' + e, 'error');
                     });
                     addLogMessage('Training Log protocol extracted: ' + (study ? study.protocol : 'none') + ', study ' + (study ? 'matched' : 'not configured'), 'log');
                 } else {
                     addLogMessage('Training Log: same as existing persisted log, keeping current', 'log');
-                    fetchLegendFromTrainingLog(log).then(function(found) {
-                        if (!found) tryExtractLegend();
-                    });
+                    fetchLegendFromTrainingLog(log);
                 }
                 setTlogStatus('success', 'Latest Training Log Found');
             } else {
@@ -22521,7 +23219,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
         var status = document.createElement('div');
         status.id = 'florence-tlog-staff-save-status';
-        status.textContent = trainingLogState.staffList.nonPiText ? 'Staff list saved for this session.' : '';
+        status.textContent = trainingLogState.staffList.nonPiText ? 'Staff list saved.' : '';
         status.style.cssText = 'min-height: 16px; color: #6b7280; font-size: 11px;';
         card.appendChild(status);
 
@@ -22532,12 +23230,22 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var runBtn = makeTrainingLogStaffButton('Run', 'primary');
         clearBtn.onclick = function() {
             staffTextarea.value = '';
-            saveTrainingLogStaffListNonPi('');
-            status.textContent = 'Staff list cleared.';
+            saveTrainingLogStaffListNonPi('').then(function() {
+                status.style.color = '#6b7280';
+                status.textContent = 'Staff list cleared.';
+            }).catch(function() {
+                status.style.color = '#dc2626';
+                status.textContent = 'Staff list clear failed.';
+            });
         };
         saveBtn.onclick = function() {
-            saveTrainingLogStaffListNonPi(staffTextarea.value);
-            status.textContent = 'Staff list saved for this session.';
+            saveTrainingLogStaffListNonPi(staffTextarea.value).then(function() {
+                status.style.color = '#6b7280';
+                status.textContent = 'Staff list saved.';
+            }).catch(function() {
+                status.style.color = '#dc2626';
+                status.textContent = 'Staff list save failed.';
+            });
         };
         runBtn.onclick = function() {
             var currentText = staffTextarea.value;
@@ -22572,7 +23280,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var status = document.getElementById('florence-tlog-staff-save-status');
         if (status) {
             status.style.color = '#6b7280';
-            status.textContent = trainingLogState.staffList.nonPiText ? 'Staff list saved for this session.' : '';
+            status.textContent = trainingLogState.staffList.nonPiText ? 'Staff list saved.' : '';
         }
         renderTrainingLogPiList();
     }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Florence Automator",
-  "version": "2.5.3",
+  "version": "2.5.15",
   "description": "Automator sidebar for Research Binders",
   "icons": {
     "16": "icon16.png",
