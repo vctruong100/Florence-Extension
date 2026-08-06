@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.23
+// Version: 2.5.38
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -170,7 +170,7 @@
     };
 
     const DOA_LABELS = {
-        featureButton: 'Add DoA Log Staff Entries',
+        featureButton: 'Add Staff Entries (DoA)',
         statusPending: 'Pending',
         statusDuplicate: 'Duplicate',
         statusAlready: 'Already Exist',
@@ -707,7 +707,7 @@
         elogState.isRunning = true;
         elogState.timer = createFeatureTimer('elog');
         elogState.timer.start();
-        showCollectingDataPanel('elog', 'Add Training Log Staff Entries');
+        showCollectingDataPanel('elog', 'Add Staff Entries (Training Log)');
         startELogScan();
         return true;
     }
@@ -736,6 +736,38 @@
         if (a === b) return true;
         if (Math.abs(a.length - b.length) > maxDist) return false;
         return levenshteinDistance(a, b) <= maxDist;
+    }
+
+    function isTokenTypoMatch(inputToken, optionToken, maxDist) {
+        if (typeof maxDist === 'undefined') maxDist = 2;
+        inputToken = elogNormalizeName(inputToken || '');
+        optionToken = elogNormalizeName(optionToken || '');
+        if (!inputToken || !optionToken) return false;
+        if (inputToken === optionToken) return true;
+        if (Math.abs(inputToken.length - optionToken.length) > maxDist) return false;
+        var effectiveMax = Math.min(maxDist, Math.max(1, Math.floor(Math.max(inputToken.length, optionToken.length) / 4)));
+        return levenshteinDistance(inputToken, optionToken) <= effectiveMax;
+    }
+
+    function isPairKeyTokenTypoMatch(optionPairKey, targetPairKey, maxDist) {
+        optionPairKey = String(optionPairKey || '').trim();
+        targetPairKey = String(targetPairKey || '').trim();
+        if (!optionPairKey || !targetPairKey) return false;
+        if (optionPairKey === targetPairKey) return true;
+        var optionParts = optionPairKey.split(/\s+/);
+        var targetParts = targetPairKey.split(/\s+/);
+        if (optionParts.length < 2 || targetParts.length < 2) {
+            return isWithinTypoTolerance(optionPairKey, targetPairKey, maxDist);
+        }
+        var optionFirst = optionParts[0];
+        var optionLast = optionParts[optionParts.length - 1];
+        var targetFirst = targetParts[0];
+        var targetLast = targetParts[targetParts.length - 1];
+        var firstMatch = isTokenTypoMatch(targetFirst, optionFirst, maxDist);
+        var lastMatch = isTokenTypoMatch(targetLast, optionLast, maxDist);
+        var firstExact = targetFirst === optionFirst;
+        var lastExact = targetLast === optionLast;
+        return firstMatch && lastMatch && (firstExact || lastExact);
     }
 
     function findFuzzyMatchInPairs(pairKey, pairSet, maxDist) {
@@ -1813,7 +1845,7 @@
         if (progressModal && progressModal.parentNode) {
             progressModal.parentNode.removeChild(progressModal);
         }
-        showCollectingDataPanel('elog', 'Add Training Log Staff Entries');
+        showCollectingDataPanel('elog', 'Add Staff Entries (Training Log)');
         addLogMessage('performRescan: starting auto-scroll scan', 'log');
         autoScrollScan({
             onRow: function(name, normalized) {
@@ -1994,10 +2026,15 @@
                     }
                     var match = scanFilteredOptionsForMatch(targetPairKey, selectors, candidates);
                     if (match && match.noResults) {
-                        addLogMessage(stepLabel + ': "No Matching Results" detected, clearing input and skipping to next name', 'warn');
                         clearFilteredInput(inputEl);
                         state.activeDropdown = null;
-                        resolve(false);
+                        if (termIndex + 1 < searchTerms.length) {
+                            addLogMessage(stepLabel + ': "No Matching Results" detected, trying next search term', 'warn');
+                            tryNameSearchTermsSequentially(searchTerms, termIndex + 1, inputEl, targetPairKey, selectors, timeouts, state, candidates, logPrefix, resolve, 0);
+                        } else {
+                            addLogMessage(stepLabel + ': "No Matching Results" detected on final search term, skipping to next name', 'warn');
+                            resolve(false);
+                        }
                         return;
                     }
                     if (match) {
@@ -2053,10 +2090,15 @@
                     // Before moving to next term, check if "No Matching Results" is shown
                     var noResultsEl = document.querySelector('li.filtered-select__list__no-results');
                     if (noResultsEl && noResultsEl.textContent.trim().toLowerCase().includes('no matching results')) {
-                        addLogMessage(stepLabel + ': "No Matching Results" detected after retries, clearing input and skipping to next name', 'warn');
                         clearFilteredInput(inputEl);
                         state.activeDropdown = null;
-                        resolve(false);
+                        if (termIndex + 1 < searchTerms.length) {
+                            addLogMessage(stepLabel + ': "No Matching Results" detected after retries, trying next search term', 'warn');
+                            tryNameSearchTermsSequentially(searchTerms, termIndex + 1, inputEl, targetPairKey, selectors, timeouts, state, candidates, logPrefix, resolve, 0);
+                        } else {
+                            addLogMessage(stepLabel + ': "No Matching Results" detected after final search term, skipping to next name', 'warn');
+                            resolve(false);
+                        }
                         return;
                     }
                     addLogMessage(stepLabel + ': not found after retries, trying next term', 'log');
@@ -2477,8 +2519,8 @@
             fOptText = fOptText.trim();
             var fOptPairKey = normalizeFirstLastPair(fOptText);
             for (var ki3 = 0; ki3 < matchKeys.length; ki3++) {
-                if (isWithinTypoTolerance(fOptPairKey, matchKeys[ki3], 2)) {
-                    addLogMessage('scanFilteredOptionsForMatch: fuzzy match (typo tolerance) at index ' + fi + ' text=' + fOptText + ' matchedKey=' + matchKeys[ki3], 'log');
+                if (isPairKeyTokenTypoMatch(fOptPairKey, matchKeys[ki3], 2)) {
+                    addLogMessage('scanFilteredOptionsForMatch: token fuzzy match (typo tolerance) at index ' + fi + ' text=' + fOptText + ' matchedKey=' + matchKeys[ki3], 'log');
                     return { element: options[fi], matchType: 'fuzzy' };
                 }
             }
@@ -2580,8 +2622,8 @@
                     for (var foi = 0; foi < options.length; foi++) {
                         var foOptPairKey = normalizeFirstLastPair(optionTexts[foi]);
                         for (var fmki = 0; fmki < matchKeys.length; fmki++) {
-                            if (isWithinTypoTolerance(foOptPairKey, matchKeys[fmki], 2)) {
-                                addLogMessage('scrollSearchForName: fuzzy match found at index ' + foi + ' text=' + optionTexts[foi], 'log');
+                            if (isPairKeyTokenTypoMatch(foOptPairKey, matchKeys[fmki], 2)) {
+                                addLogMessage('scrollSearchForName: token fuzzy match found at index ' + foi + ' text=' + optionTexts[foi], 'log');
                                 state.activeDropdown = null;
                                 options[foi].click();
                                 found = true;
@@ -5633,7 +5675,7 @@
     };
 
     const CLEAN_LABELS = {
-        featureButton: 'Add Study Resp. (DoA Template)',
+        featureButton: 'Set Resp. (Template)',
         inputTitle: 'Add Study Responsibilities',
         resultsTitle: 'Study Responsibilities',
         responsibilitiesHeader: 'Responsibilities',
@@ -10592,6 +10634,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         nameFallback: '.test-logEntrySignature span',
         checkboxCellIndex: 1,
         checkboxInCell: '[role="checkbox"], .checkbox-icon',
+        signatureCellIndex: 4,
+        signatureCellText: '.entry-signature, .test-logEntrySignature, span, div',
         ariaLiveRegion: '.aria-live-region'
     };
 
@@ -10621,10 +10665,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
         inputTitle: 'Select Checkboxes Input',
         progressTitle: 'Selecting Checkboxes',
         toggleSelectAll: 'Select All',
+        toggleSelectUnrequested: 'Select Unrequested',
         statusPending: 'Pending',
         statusSelected: 'Selected',
         statusAlready: 'Already Checked',
         statusNotInTable: 'Not In Table',
+        statusNotUnrequested: 'Skipped (Not Unrequested)',
         statusFailed: 'Failed',
         statusStrikethrough: 'Strikethrough',
         statusStopped: 'Stopped',
@@ -10653,6 +10699,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         isRunning: false,
         stopRequested: false,
         selectAllOn: false,
+        selectUnrequestedOn: false,
         observers: [],
         timeouts: [],
         intervals: [],
@@ -10679,6 +10726,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         cbSelectState.isRunning = false;
         cbSelectState.stopRequested = false;
         cbSelectState.selectAllOn = false;
+        cbSelectState.selectUnrequestedOn = false;
         cbSelectState.observers = [];
         cbSelectState.timeouts = [];
         cbSelectState.intervals = [];
@@ -10862,6 +10910,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var lines = [
             'Enter names to select their checkboxes in the Document Log. Separate names with commas or place each name on a new line.',
             'Use the Select All toggle to select all checkboxes instead.',
+            'Use Select Unrequested for Training Logs to select rows where Signature is Unrequested.',
             'After clicking Confirm, do not click anywhere else on the page, as this will impact the process.'
         ];
         for (var i = 0; i < lines.length; i++) {
@@ -10887,6 +10936,28 @@ function showResponsibilitiesProgressPanel(rolesData) {
         toggleKnob.style.cssText = 'position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #ffffff; transition: transform 0.3s ease; pointer-events: none;';
         toggleSwitch.appendChild(toggleKnob);
         var selectAllOn = false;
+        var unrequestedContainer = document.createElement('div');
+        unrequestedContainer.style.cssText = 'display: flex; align-items: center; gap: 12px; margin-bottom: 12px; padding: 10px 14px; background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 8px;';
+        var unrequestedLabel = document.createElement('span');
+        unrequestedLabel.textContent = CB_SELECT_LABELS.toggleSelectUnrequested;
+        unrequestedLabel.style.cssText = 'color: #374151; font-size: 14px; font-weight: 500;';
+        unrequestedLabel.id = 'cb-select-unrequested-toggle-label';
+        var unrequestedInfo = document.createElement('span');
+        unrequestedInfo.textContent = '?';
+        unrequestedInfo.title = 'Only works for Training Logs. Selects rows where the Signature column is exactly Unrequested.';
+        unrequestedInfo.setAttribute('aria-label', unrequestedInfo.title);
+        unrequestedInfo.style.cssText = 'display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border-radius: 50%; background: #e0f2fe; color: #0369a1; font-size: 12px; font-weight: 700; cursor: help; flex-shrink: 0;';
+        var unrequestedSwitch = document.createElement('button');
+        unrequestedSwitch.id = 'cb-select-unrequested-toggle';
+        unrequestedSwitch.setAttribute('role', 'switch');
+        unrequestedSwitch.setAttribute('aria-checked', 'false');
+        unrequestedSwitch.setAttribute('aria-labelledby', 'cb-select-unrequested-toggle-label');
+        unrequestedSwitch.tabIndex = 0;
+        unrequestedSwitch.style.cssText = 'position: relative; width: 48px; height: 26px; border-radius: 13px; border: 2px solid #d1d5db; background: #e5e7eb; cursor: pointer; transition: all 0.3s ease; padding: 0; flex-shrink: 0;';
+        var unrequestedKnob = document.createElement('span');
+        unrequestedKnob.style.cssText = 'position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #ffffff; transition: transform 0.3s ease; pointer-events: none;';
+        unrequestedSwitch.appendChild(unrequestedKnob);
+        var selectUnrequestedOn = false;
         var textarea = document.createElement('textarea');
         textarea.id = 'cb-select-names-input';
         textarea.placeholder = 'Name1, Name2, Name3\nor\nName1\nName2\nName3';
@@ -10902,8 +10973,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
         confirmButton.textContent = 'Confirm';
         confirmButton.disabled = true;
         confirmButton.style.cssText = 'background: #22c55e; border: 1px solid #22c55e; color: #ffffff; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; letter-spacing: 0.2px; transition: all 0.15s ease; opacity: 0.5;';
+        var setSwitchVisual = function(switchEl, knobEl, isOn) {
+            switchEl.setAttribute('aria-checked', String(isOn));
+            if (isOn) {
+                switchEl.style.background = '#22c55e';
+                switchEl.style.borderColor = '#22c55e';
+                knobEl.style.transform = 'translateX(22px)';
+            } else {
+                switchEl.style.background = '#e5e7eb';
+                switchEl.style.borderColor = '#d1d5db';
+                knobEl.style.transform = 'translateX(0)';
+            }
+        };
+        var updateTextboxState = function() {
+            var locked = selectAllOn || selectUnrequestedOn;
+            textarea.disabled = locked;
+            textarea.style.opacity = locked ? '0.4' : '1';
+            textarea.style.cursor = locked ? 'not-allowed' : 'text';
+        };
         var updateConfirmState = function() {
-            if (selectAllOn) {
+            if (selectAllOn || selectUnrequestedOn) {
                 confirmButton.disabled = false;
                 confirmButton.style.opacity = '1';
                 confirmButton.style.cursor = 'pointer';
@@ -10923,28 +11012,34 @@ function showResponsibilitiesProgressPanel(rolesData) {
         textarea.oninput = updateConfirmState;
         toggleSwitch.onclick = function() {
             selectAllOn = !selectAllOn;
-            toggleSwitch.setAttribute('aria-checked', String(selectAllOn));
             if (selectAllOn) {
-                toggleSwitch.style.background = '#22c55e';
-                toggleSwitch.style.borderColor = '#22c55e';
-                toggleKnob.style.transform = 'translateX(22px)';
-                textarea.disabled = true;
-                textarea.style.opacity = '0.4';
-                textarea.style.cursor = 'not-allowed';
-            } else {
-                toggleSwitch.style.background = '#e5e7eb';
-                toggleSwitch.style.borderColor = '#d1d5db';
-                toggleKnob.style.transform = 'translateX(0)';
-                textarea.disabled = false;
-                textarea.style.opacity = '1';
-                textarea.style.cursor = 'text';
+                selectUnrequestedOn = false;
             }
+            setSwitchVisual(toggleSwitch, toggleKnob, selectAllOn);
+            setSwitchVisual(unrequestedSwitch, unrequestedKnob, selectUnrequestedOn);
+            updateTextboxState();
             updateConfirmState();
         };
         toggleSwitch.onkeydown = function(e) {
             if (e.key === ' ' || e.key === 'Enter') {
                 e.preventDefault();
                 toggleSwitch.click();
+            }
+        };
+        unrequestedSwitch.onclick = function() {
+            selectUnrequestedOn = !selectUnrequestedOn;
+            if (selectUnrequestedOn) {
+                selectAllOn = false;
+            }
+            setSwitchVisual(unrequestedSwitch, unrequestedKnob, selectUnrequestedOn);
+            setSwitchVisual(toggleSwitch, toggleKnob, selectAllOn);
+            updateTextboxState();
+            updateConfirmState();
+        };
+        unrequestedSwitch.onkeydown = function(e) {
+            if (e.key === ' ' || e.key === 'Enter') {
+                e.preventDefault();
+                unrequestedSwitch.click();
             }
         };
         confirmButton.onmouseover = function() {
@@ -10956,9 +11051,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
             confirmButton.style.background = '#22c55e'; confirmButton.style.borderColor = '#22c55e';
         };
         confirmButton.onclick = function() {
-            addLogMessage('showSelectCheckboxesInputPanel: Confirm clicked, selectAll=' + selectAllOn, 'log');
+            addLogMessage('showSelectCheckboxesInputPanel: Confirm clicked, selectAll=' + selectAllOn + ' selectUnrequested=' + selectUnrequestedOn, 'log');
             cbSelectState.selectAllOn = selectAllOn;
-            if (!selectAllOn) {
+            cbSelectState.selectUnrequestedOn = selectUnrequestedOn;
+            if (!selectAllOn && !selectUnrequestedOn) {
                 var parsed = parseNamesInputForCheckboxSelect(textarea.value);
                 if (parsed.length === 0) {
                     addLogMessage('showSelectCheckboxesInputPanel: no valid names parsed', 'warn');
@@ -10988,10 +11084,20 @@ function showResponsibilitiesProgressPanel(rolesData) {
             addLogMessage('showSelectCheckboxesInputPanel: Clear All clicked', 'log');
             textarea.value = '';
             cbSelectState.parsedNames = [];
+            if (selectUnrequestedOn || selectAllOn) {
+                selectUnrequestedOn = false;
+                selectAllOn = false;
+                setSwitchVisual(unrequestedSwitch, unrequestedKnob, false);
+                setSwitchVisual(toggleSwitch, toggleKnob, false);
+                updateTextboxState();
+            }
             updateConfirmState();
         };
         toggleContainer.appendChild(toggleLabel);
         toggleContainer.appendChild(toggleSwitch);
+        unrequestedContainer.appendChild(unrequestedLabel);
+        unrequestedContainer.appendChild(unrequestedInfo);
+        unrequestedContainer.appendChild(unrequestedSwitch);
         var buttonContainer = document.createElement('div');
         buttonContainer.style.cssText = 'display: flex; gap: 12px; margin-top: 20px; justify-content: flex-end;';
         buttonContainer.appendChild(clearButton);
@@ -10999,6 +11105,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.appendChild(header);
         container.appendChild(description);
         container.appendChild(toggleContainer);
+        container.appendChild(unrequestedContainer);
         container.appendChild(textarea);
         container.appendChild(buttonContainer);
         modal.appendChild(container);
@@ -11139,7 +11246,69 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return cleaned;
     }
 
-    function mapRowToNameAndCheckbox(rowEl) {
+    function cbNormalizeCellText(text) {
+        return String(text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function cbIsUnrequestedSignatureText(text) {
+        return /^unrequested$/i.test(cbNormalizeCellText(text));
+    }
+
+    function cbDetectSignatureColumnIndex(gridTable) {
+        try {
+            var headerRows = gridTable ? gridTable.querySelectorAll(CB_SELECT_SELECTORS.row) : [];
+            for (var ri = 0; ri < headerRows.length; ri++) {
+                var row = headerRows[ri];
+                var headers = row.querySelectorAll('[role="columnheader"]');
+                if (!headers || headers.length === 0) {
+                    continue;
+                }
+                for (var hi = 0; hi < headers.length; hi++) {
+                    var headerText = cbNormalizeCellText(headers[hi].textContent).toLowerCase();
+                    if (headerText === 'signature' || headerText.indexOf(' signature') !== -1 || headerText.indexOf('signature ') !== -1) {
+                        addLogMessage('cbDetectSignatureColumnIndex: detected Signature column at index ' + hi, 'log');
+                        return hi;
+                    }
+                }
+            }
+        } catch (err) {
+            addLogMessage('cbDetectSignatureColumnIndex: error: ' + err.message, 'warn');
+        }
+        addLogMessage('cbDetectSignatureColumnIndex: using default index ' + CB_SELECT_SELECTORS.signatureCellIndex, 'log');
+        return CB_SELECT_SELECTORS.signatureCellIndex;
+    }
+
+    function cbReadSignatureTextFromRow(rowEl, signatureIndex) {
+        try {
+            var cells = rowEl ? rowEl.querySelectorAll(CB_SELECT_SELECTORS.cell) : [];
+            if (!cells || cells.length <= signatureIndex) {
+                return '';
+            }
+            var sigCell = cells[signatureIndex];
+            var sigEl = sigCell.querySelector(CB_SELECT_SELECTORS.signatureCellText);
+            var text = sigEl ? sigEl.textContent : sigCell.textContent;
+            return cbNormalizeCellText(text);
+        } catch (err) {
+            return '';
+        }
+    }
+
+    function cbIsRowStrikethrough(rowEl) {
+        if (!rowEl) return false;
+        if (rowEl.querySelector('.log-entry--struckThrough')) return true;
+        var nodes = [rowEl].concat(Array.prototype.slice.call(rowEl.querySelectorAll('*')));
+        for (var i = 0; i < nodes.length; i++) {
+            try {
+                var style = window.getComputedStyle(nodes[i]);
+                if (style && style.textDecorationLine && style.textDecorationLine.indexOf('line-through') !== -1) {
+                    return true;
+                }
+            } catch (e) {}
+        }
+        return false;
+    }
+
+    function mapRowToNameAndCheckbox(rowEl, signatureIndex) {
         try {
             var cells = rowEl.querySelectorAll(CB_SELECT_SELECTORS.cell);
             if (cells.length <= CB_SELECT_SELECTORS.nameCellIndex) {
@@ -11183,6 +11352,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 pairKey: normalizeFirstLastPair(cleanedName),
                 checkboxEl: checkboxEl,
                 checked: isChecked,
+                signatureText: cbReadSignatureTextFromRow(rowEl, signatureIndex),
+                isStrikethrough: cbIsRowStrikethrough(rowEl),
                 rowEl: rowEl
             };
         } catch (err) {
@@ -11195,16 +11366,21 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var leftPanel = document.getElementById('cb-select-left-panel');
         var fragment = document.createDocumentFragment();
         var newCount = 0;
+        var signatureIndex = cbDetectSignatureColumnIndex(gridTable);
         for (var ri = 0; ri < rows.length; ri++) {
             var row = rows[ri];
             if (row.getAttribute('role') === 'columnheader') {
                 continue;
             }
-            var mapped = mapRowToNameAndCheckbox(row);
+            var mapped = mapRowToNameAndCheckbox(row, signatureIndex);
             if (!mapped) {
                 continue;
             }
-            var normKey = elogNormalizeName(mapped.display);
+            var rowCellsForKey = row.querySelectorAll(CB_SELECT_SELECTORS.cell);
+            var rowNumberForKey = rowCellsForKey.length > 0 ? cbNormalizeCellText(rowCellsForKey[0].textContent) : '';
+            var normKey = (cbSelectState.selectAllOn || cbSelectState.selectUnrequestedOn) ?
+                [rowNumberForKey, mapped.pairKey, mapped.signatureText].join('|') :
+                elogNormalizeName(mapped.display);
             if (cbSelectState.seenNormalizedNames.has(normKey)) {
                 continue;
             }
@@ -11317,23 +11493,59 @@ function showResponsibilitiesProgressPanel(rolesData) {
         cbSelectState.eventListeners.push({ element: container, type: 'scroll', handler: cbSelectState.userScrollHandler });
     }
 
-    function enqueueTargets(selectAllOn, parsedNames, discoveredRows) {
-        addLogMessage('enqueueTargets: selectAll=' + selectAllOn + ' parsed=' + parsedNames.length + ' discovered=' + discoveredRows.length, 'log');
+    function cbTargetHasUnrequestedSignature(target) {
+        if (!target) {
+            return false;
+        }
+        if (target.rowEl && target.rowEl.isConnected) {
+            var gridTable = document.querySelector(CB_SELECT_SELECTORS.gridTable);
+            var signatureIndex = cbDetectSignatureColumnIndex(gridTable);
+            target.signatureText = cbReadSignatureTextFromRow(target.rowEl, signatureIndex);
+        }
+        return cbIsUnrequestedSignatureText(target.signatureText);
+    }
+
+    function cbBuildRowTargetKey(row, index) {
+        var rowNumber = '';
+        if (row && row.rowEl) {
+            var rowCells = row.rowEl.querySelectorAll(CB_SELECT_SELECTORS.cell);
+            rowNumber = rowCells.length > 0 ? cbNormalizeCellText(rowCells[0].textContent) : '';
+        }
+        return [rowNumber, row ? row.pairKey : '', row ? row.signatureText : '', index].join('|');
+    }
+
+    function enqueueTargets(selectAllOn, selectUnrequestedOn, parsedNames, discoveredRows) {
+        addLogMessage('enqueueTargets: selectAll=' + selectAllOn + ' selectUnrequested=' + selectUnrequestedOn + ' parsed=' + parsedNames.length + ' discovered=' + discoveredRows.length, 'log');
         var targets = [];
         var seenKeys = new Set();
-        if (selectAllOn) {
+        if (selectAllOn || selectUnrequestedOn) {
             for (var di = 0; di < discoveredRows.length; di++) {
                 var row = discoveredRows[di];
-                if (seenKeys.has(row.pairKey)) {
+                var rowNumber = '';
+                if (row.rowEl) {
+                    var rowCells = row.rowEl.querySelectorAll(CB_SELECT_SELECTORS.cell);
+                    rowNumber = rowCells.length > 0 ? cbNormalizeCellText(rowCells[0].textContent) : '';
+                }
+                var rowKey = [rowNumber, row.pairKey, row.signatureText, di].join('|');
+                if (seenKeys.has(rowKey)) {
                     continue;
                 }
-                seenKeys.add(row.pairKey);
+                if (selectUnrequestedOn && !cbIsUnrequestedSignatureText(row.signatureText)) {
+                    continue;
+                }
+                if (selectUnrequestedOn && row.isStrikethrough) {
+                    continue;
+                }
+                seenKeys.add(rowKey);
                 targets.push({
                     display: row.display,
                     pairKey: row.pairKey,
                     status: CB_SELECT_LABELS.statusPending,
                     checkboxEl: row.checkboxEl,
                     checked: row.checked,
+                    signatureText: row.signatureText,
+                    isStrikethrough: row.isStrikethrough,
+                    rowKey: rowKey,
                     rowEl: row.rowEl
                 });
             }
@@ -11358,6 +11570,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
                         status: CB_SELECT_LABELS.statusPending,
                         checkboxEl: match.checkboxEl,
                         checked: match.checked,
+                        signatureText: match.signatureText,
+                        isStrikethrough: match.isStrikethrough,
+                        rowKey: parsed.pairKey,
                         rowEl: match.rowEl
                     });
                 } else {
@@ -11367,6 +11582,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                         status: CB_SELECT_LABELS.statusNotInTable,
                         checkboxEl: null,
                         checked: false,
+                        rowKey: parsed.pairKey,
                         rowEl: null
                     });
                 }
@@ -11418,7 +11634,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         cbSelectState.timeouts.push(verifyTid);
     }
 
-    function cbUpdateRightPanelStatus(pairKey, newStatus) {
+    function cbUpdateRightPanelStatus(pairKey, newStatus, rowKey) {
         var rightPanel = document.getElementById('cb-select-right-panel');
         if (!rightPanel) {
             return;
@@ -11427,7 +11643,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         for (var i = 0; i < items.length; i++) {
             var item = items[i];
             var itemPairKey = item.getAttribute('data-pairkey');
-            if (itemPairKey === pairKey) {
+            var itemRowKey = item.getAttribute('data-cb-rowkey');
+            var isMatch = rowKey ? (itemRowKey === rowKey) : (itemPairKey === pairKey);
+            if (isMatch) {
                 var badge = item.querySelector('.elog-status-badge');
                 if (badge) {
                     badge.textContent = newStatus;
@@ -11445,6 +11663,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     } else if (newStatus === CB_SELECT_LABELS.statusNotInTable) {
                         badgeColor = '#dc2626';
                         badgeBg = '#fee2e2';
+                    } else if (newStatus === CB_SELECT_LABELS.statusNotUnrequested) {
+                        badgeColor = '#6b7280';
+                        badgeBg = '#e5e7eb';
                     } else if (newStatus === CB_SELECT_LABELS.statusFailed) {
                         badgeColor = '#dc2626';
                         badgeBg = '#fee2e2';
@@ -11561,12 +11782,19 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (t.status === CB_SELECT_LABELS.statusNotInTable || !t.checkboxEl || !t.checkboxEl.isConnected) {
                 continue;
             }
-            if (t.rowEl && t.rowEl.querySelector('.log-entry--struckThrough')) {
+            if (t.isStrikethrough || cbIsRowStrikethrough(t.rowEl)) {
                 t.status = CB_SELECT_LABELS.statusStrikethrough;
                 cbSelectState.counters.strikethrough++;
                 cbSelectState.counters.pending--;
-                cbUpdateRightPanelStatus(t.pairKey, CB_SELECT_LABELS.statusStrikethrough);
+                    cbUpdateRightPanelStatus(t.pairKey, CB_SELECT_LABELS.statusStrikethrough, t.rowKey);
                 skippedStrike++;
+                continue;
+            }
+            if (cbSelectState.selectUnrequestedOn && !cbTargetHasUnrequestedSignature(t)) {
+                t.status = CB_SELECT_LABELS.statusNotUnrequested;
+                cbSelectState.counters.notFound++;
+                cbSelectState.counters.pending--;
+                cbUpdateRightPanelStatus(t.pairKey, CB_SELECT_LABELS.statusNotUnrequested, t.rowKey);
                 continue;
             }
             var ariaChecked = t.checkboxEl.getAttribute('aria-checked');
@@ -11574,7 +11802,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 t.status = CB_SELECT_LABELS.statusAlready;
                 cbSelectState.counters.alreadyChecked++;
                 cbSelectState.counters.pending--;
-                cbUpdateRightPanelStatus(t.pairKey, CB_SELECT_LABELS.statusAlready);
+                cbUpdateRightPanelStatus(t.pairKey, CB_SELECT_LABELS.statusAlready, t.rowKey);
                 skippedAlready++;
                 continue;
             }
@@ -11636,7 +11864,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     bt.status = CB_SELECT_LABELS.statusSelected;
                     cbSelectState.counters.selected++;
                     cbSelectState.counters.pending--;
-                    cbUpdateRightPanelStatus(bt.pairKey, CB_SELECT_LABELS.statusSelected);
+                    cbUpdateRightPanelStatus(bt.pairKey, CB_SELECT_LABELS.statusSelected, bt.rowKey);
                     successCount++;
                 } else {
                     bt.status = CB_SELECT_LABELS.statusPending;
@@ -11655,7 +11883,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     function beginCheckboxSelectionRun() {
         addLogMessage('beginCheckboxSelectionRun: starting scan', 'log');
         openCheckboxSelectProgressPanel();
-        cbSetProcessingIndicator(cbSelectState.selectAllOn ? 'Preparing Select All. The page is processing...' : 'Preparing checkbox selection...', true);
+        cbSetProcessingIndicator(cbSelectState.selectAllOn ? 'Preparing Select All. The page is processing...' : (cbSelectState.selectUnrequestedOn ? 'Preparing Select Unrequested. The page is processing...' : 'Preparing checkbox selection...'), true);
         cbAfterNextPaint(beginCheckboxSelectionRunCore);
     }
 
@@ -11663,7 +11891,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         cbSetAriaBusyOn();
         cbUpdateAriaLive('Scan started');
         cbSetProcessingIndicator('Scanning visible log entries...', true);
-        if (!cbSelectState.selectAllOn) {
+        if (!cbSelectState.selectAllOn && !cbSelectState.selectUnrequestedOn) {
             var rightPanel = document.getElementById('cb-select-right-panel');
             if (rightPanel) {
                 rightPanel.innerHTML = '';
@@ -11671,6 +11899,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     var nameObj = cbSelectState.parsedNames[ni];
                     var item = createListItem(nameObj.display, CB_SELECT_LABELS.statusPending, 'pending', ni + 1);
                     item.setAttribute('data-pairkey', nameObj.pairKey);
+                    item.setAttribute('data-cb-rowkey', nameObj.pairKey);
                     rightPanel.appendChild(item);
                 }
             }
@@ -11792,23 +12021,24 @@ function showResponsibilitiesProgressPanel(rolesData) {
             addLogMessage('beginCheckboxSelectionRun: scan done reason=' + reason + ' scanned=' + cbSelectState.scannedRows.length, 'log');
             cbSetProcessingIndicator('Preparing checkbox selection list...', true);
             cbUpdateAriaLive('Scan complete, found ' + cbSelectState.scannedRows.length + ' rows');
-            var targets = enqueueTargets(cbSelectState.selectAllOn, cbSelectState.parsedNames, cbSelectState.scannedRows);
+            var targets = enqueueTargets(cbSelectState.selectAllOn, cbSelectState.selectUnrequestedOn, cbSelectState.parsedNames, cbSelectState.scannedRows);
             cbSelectState.targets = targets;
             cbSelectState.targetIndex = 0;
-            if (cbSelectState.selectAllOn) {
+            if (cbSelectState.selectAllOn || cbSelectState.selectUnrequestedOn) {
                 var rPanel = document.getElementById('cb-select-right-panel');
                 if (rPanel) {
                     rPanel.innerHTML = '';
                     for (var ti = 0; ti < targets.length; ti++) {
                         var tItem = createListItem(targets[ti].display, CB_SELECT_LABELS.statusPending, 'pending', ti + 1);
                         tItem.setAttribute('data-pairkey', targets[ti].pairKey);
+                        tItem.setAttribute('data-cb-rowkey', targets[ti].rowKey || targets[ti].pairKey);
                         rPanel.appendChild(tItem);
                     }
                 }
             } else {
                 for (var ti2 = 0; ti2 < targets.length; ti2++) {
                     if (targets[ti2].status === CB_SELECT_LABELS.statusNotInTable) {
-                        cbUpdateRightPanelStatus(targets[ti2].pairKey, CB_SELECT_LABELS.statusNotInTable);
+                        cbUpdateRightPanelStatus(targets[ti2].pairKey, CB_SELECT_LABELS.statusNotInTable, targets[ti2].rowKey);
                     }
                 }
             }
@@ -11871,23 +12101,35 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 target.status = CB_SELECT_LABELS.statusAlready;
                 cbSelectState.counters.alreadyChecked++;
                 cbSelectState.counters.pending--;
-                cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusAlready);
+                cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusAlready, target.rowKey);
                 cbUpdateRightPanelSummary();
                 cbSelectState.targetIndex++;
                 var tid1 = setTimeout(processNextCheckboxTarget, 20);
                 cbSelectState.timeouts.push(tid1);
                 return;
             }
-            if (target.rowEl && target.rowEl.querySelector('.log-entry--struckThrough')) {
+            if (target.isStrikethrough || cbIsRowStrikethrough(target.rowEl)) {
                 addLogMessage('processNextCheckboxTarget: skipping strikethrough entry: ' + target.display, 'log');
                 target.status = CB_SELECT_LABELS.statusStrikethrough;
                 cbSelectState.counters.strikethrough++;
                 cbSelectState.counters.pending--;
-                cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusStrikethrough);
+                cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusStrikethrough, target.rowKey);
                 cbUpdateRightPanelSummary();
                 cbSelectState.targetIndex++;
                 var tidStrike = setTimeout(processNextCheckboxTarget, 20);
                 cbSelectState.timeouts.push(tidStrike);
+                return;
+            }
+            if (cbSelectState.selectUnrequestedOn && !cbTargetHasUnrequestedSignature(target)) {
+                addLogMessage('processNextCheckboxTarget: skipping non-unrequested entry: ' + target.display, 'log');
+                target.status = CB_SELECT_LABELS.statusNotUnrequested;
+                cbSelectState.counters.notFound++;
+                cbSelectState.counters.pending--;
+                cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusNotUnrequested, target.rowKey);
+                cbUpdateRightPanelSummary();
+                cbSelectState.targetIndex++;
+                var tidUnreq = setTimeout(processNextCheckboxTarget, 20);
+                cbSelectState.timeouts.push(tidUnreq);
                 return;
             }
             selectCheckboxForRow(target, 0, function(success) {
@@ -11895,12 +12137,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     target.status = CB_SELECT_LABELS.statusSelected;
                     cbSelectState.counters.selected++;
                     cbSelectState.counters.pending--;
-                    cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusSelected);
+                    cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusSelected, target.rowKey);
                 } else {
                     target.status = CB_SELECT_LABELS.statusFailed;
                     cbSelectState.counters.failures++;
                     cbSelectState.counters.pending--;
-                    cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusFailed);
+                    cbUpdateRightPanelStatus(target.pairKey, CB_SELECT_LABELS.statusFailed, target.rowKey);
                 }
                 cbUpdateRightPanelSummary();
                 cbSelectState.targetIndex++;
@@ -11913,7 +12155,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (cbSelectState.targets[si2].status === CB_SELECT_LABELS.statusPending) {
                     cbSelectState.targets[si2].status = CB_SELECT_LABELS.statusStopped;
                     cbSelectState.counters.pending--;
-                    cbUpdateRightPanelStatus(cbSelectState.targets[si2].pairKey, CB_SELECT_LABELS.statusStopped);
+                    cbUpdateRightPanelStatus(cbSelectState.targets[si2].pairKey, CB_SELECT_LABELS.statusStopped, cbSelectState.targets[si2].rowKey);
                 }
             }
             cbUpdateRightPanelSummary();
@@ -12048,6 +12290,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         nameCellIndex: 3,
         namePrimary: '.u-text-overflow-ellipsis',
         nameFallback: '.test-logEntrySignature span',
+        startDateColIndex: 6,
         staffSigColIndex: 7,
         piSigColIndex: 8,
         sigSignedBlock: '.test-logEntrySignature',
@@ -12079,8 +12322,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
     };
 
     const SSIG_LABELS = {
-        featureButton: 'Select Signed Checkbox (DOA)',
-        progressTitle: 'Select Signed Checkbox (DOA)',
+        featureButton: 'Select PI Signature (DoA)',
+        progressTitle: 'Select PI Signature (DoA)',
         scanning: 'Scanning table',
         selecting: 'Selecting eligible rows',
         statusPending: 'Pending',
@@ -12088,6 +12331,22 @@ function showResponsibilitiesProgressPanel(rolesData) {
         statusAlready: 'Already Checked',
         statusPISigned: 'Skipped (PI Signed)',
         statusNotEligible: 'Skipped (Unsigned Staff/Blocked)',
+        statusFailed: 'Failed',
+        statusStrikethrough: 'Strikethrough',
+        statusStopped: 'Stopped',
+        done: 'Completed'
+    };
+
+    const SSTART_LABELS = {
+        featureButton: 'Select Staff Signature (DoA)',
+        progressTitle: 'Select Staff Signature (DoA)',
+        scanning: 'Scanning table',
+        selecting: 'Selecting eligible rows',
+        statusPending: 'Pending',
+        statusSelected: 'Selected',
+        statusAlready: 'Already Checked',
+        statusPISigned: 'Skipped (Staff Signature Not Unrequested)',
+        statusNotEligible: 'Skipped (No Start Date/Not Unrequested)',
         statusFailed: 'Failed',
         statusStrikethrough: 'Strikethrough',
         statusStopped: 'Stopped',
@@ -12135,6 +12394,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         userScrollPaused: false,
         lastAutoScrollTime: 0,
         leftPanelRowIndex: 0,
+        mode: 'signed',
+        detectedStartDateColIndex: null,
         detectedStaffSigColIndex: null,
         detectedPiSigColIndex: null
     };
@@ -12159,6 +12420,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         ssigState.userScrollPaused = false;
         ssigState.lastAutoScrollTime = 0;
         ssigState.leftPanelRowIndex = 0;
+        ssigState.mode = 'signed';
+        ssigState.detectedStartDateColIndex = null;
         ssigState.detectedStaffSigColIndex = null;
         ssigState.detectedPiSigColIndex = null;
     }
@@ -12280,11 +12543,64 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return SSIG_SELECTORS.staffSigColIndex;
     }
 
+    function ssigDetectStartCheckboxColumns() {
+        addLogMessage('ssigDetectStartCheckboxColumns: detecting Start Date and Staff Signature columns', 'log');
+        ssigDetectSignatureColumns();
+        var staffIdx = ssigGetStaffSigColIndex();
+        if (staffIdx > 0) {
+            ssigState.detectedStartDateColIndex = staffIdx - 1;
+            addLogMessage('ssigDetectStartCheckboxColumns: inferred startDateCol=' + ssigState.detectedStartDateColIndex + ' staffSigCol=' + staffIdx, 'log');
+        } else {
+            addLogMessage('ssigDetectStartCheckboxColumns: using default startDateCol=' + SSIG_SELECTORS.startDateColIndex, 'warn');
+        }
+    }
+
+    function ssigGetLabels() {
+        return ssigState.mode === 'start' ? SSTART_LABELS : SSIG_LABELS;
+    }
+
+    function ssigGetStartDateColIndex() {
+        if (ssigState.detectedStartDateColIndex !== null) {
+            return ssigState.detectedStartDateColIndex;
+        }
+        return SSIG_SELECTORS.startDateColIndex;
+    }
+
     function ssigGetPiSigColIndex() {
         if (ssigState.detectedPiSigColIndex !== null) {
             return ssigState.detectedPiSigColIndex;
         }
         return SSIG_SELECTORS.piSigColIndex;
+    }
+
+    function ssigCellText(cell) {
+        return cell ? (cell.textContent || '').replace(/\s+/g, ' ').trim() : '';
+    }
+
+    function ssigHasStartDateValue(text) {
+        text = String(text || '').replace(/\s+/g, ' ').trim();
+        if (!text) return false;
+        if (/^[-–—]+$/.test(text)) return false;
+        return /\d{1,2}[-/ ]?[A-Za-z]{3,}[-/ ]?\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}[/-]\d{1,2}[/-]\d{1,2}/i.test(text);
+    }
+
+    function ssigIsUnrequestedSignature(text) {
+        return /^unrequested$/i.test(String(text || '').replace(/\s+/g, ' ').trim());
+    }
+
+    function ssigIsRowStrikethrough(rowEl) {
+        if (!rowEl) return false;
+        if (rowEl.querySelector('.log-entry--struckThrough')) return true;
+        var nodes = [rowEl].concat(Array.prototype.slice.call(rowEl.querySelectorAll('*')));
+        for (var i = 0; i < nodes.length; i++) {
+            try {
+                var style = window.getComputedStyle(nodes[i]);
+                if (style && style.textDecorationLine && style.textDecorationLine.indexOf('line-through') !== -1) {
+                    return true;
+                }
+            } catch (e) {}
+        }
+        return false;
     }
 
     function ssigReadSignatureCell(cell) {
@@ -12365,14 +12681,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             var staffSigCell = cells.length > staffColIdx ? cells[staffColIdx] : null;
             var piSigCell = cells.length > piColIdx ? cells[piColIdx] : null;
+            var startDateColIdx = ssigGetStartDateColIndex();
+            var startDateCell = cells.length > startDateColIdx ? cells[startDateColIdx] : null;
+            var startDateText = ssigCellText(startDateCell);
             var staffSig = ssigReadSignatureCell(staffSigCell);
             var piSig = ssigReadSignatureCell(piSigCell);
             var eligibility = determineSignatureEligibility(staffSig.text, piSig.text, staffSig.signed, piSig.signed);
+            if (ssigState.mode === 'start') {
+                var hasStartDate = ssigHasStartDateValue(startDateText);
+                var staffUnrequested = ssigIsUnrequestedSignature(staffSig.text);
+                eligibility = {
+                    eligible: hasStartDate && staffUnrequested,
+                    reason: hasStartDate ? (staffUnrequested ? 'eligible' : 'staffNotUnrequested') : 'noStartDate'
+                };
+            }
             return {
                 nameDisplay: nameDisplay,
                 pairKey: pairKey,
                 checkboxEl: checkboxEl,
                 isChecked: isChecked,
+                startDateText: startDateText,
                 staffSig: staffSig,
                 piSig: piSig,
                 eligible: eligibility.eligible,
@@ -12450,6 +12778,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function updateRightPanelStatusSsig(rowKey, newStatus, detailsOptional) {
+        var labels = ssigGetLabels();
         var rightPanel = document.getElementById('ssig-right-panel');
         if (!rightPanel) {
             return;
@@ -12467,28 +12796,28 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     badge.textContent = newStatus;
                     var badgeColor = '#374151';
                     var badgeBg = '#f3f4f6';
-                    if (newStatus === SSIG_LABELS.statusPending) {
+                    if (newStatus === labels.statusPending) {
                         badgeColor = '#d97706';
                         badgeBg = '#fef3c7';
-                    } else if (newStatus === SSIG_LABELS.statusSelected) {
+                    } else if (newStatus === labels.statusSelected) {
                         badgeColor = '#15803d';
                         badgeBg = '#dcfce7';
-                    } else if (newStatus === SSIG_LABELS.statusAlready) {
+                    } else if (newStatus === labels.statusAlready) {
                         badgeColor = '#2563eb';
                         badgeBg = '#dbeafe';
-                    } else if (newStatus === SSIG_LABELS.statusPISigned) {
+                    } else if (newStatus === labels.statusPISigned) {
                         badgeColor = '#d97706';
                         badgeBg = '#fef3c7';
-                    } else if (newStatus === SSIG_LABELS.statusNotEligible) {
+                    } else if (newStatus === labels.statusNotEligible) {
                         badgeColor = '#6b7280';
                         badgeBg = '#e5e7eb';
-                    } else if (newStatus === SSIG_LABELS.statusStrikethrough) {
+                    } else if (newStatus === labels.statusStrikethrough) {
                         badgeColor = '#9333ea';
                         badgeBg = '#f3e8ff';
-                    } else if (newStatus === SSIG_LABELS.statusFailed) {
+                    } else if (newStatus === labels.statusFailed) {
                         badgeColor = '#dc2626';
                         badgeBg = '#fee2e2';
-                    } else if (newStatus === SSIG_LABELS.statusStopped) {
+                    } else if (newStatus === labels.statusStopped) {
                         badgeColor = '#6b7280';
                         badgeBg = '#e5e7eb';
                     }
@@ -12548,6 +12877,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     function showSelectSignedCheckboxProgressPanel() {
         addLogMessage('showSelectSignedCheckboxProgressPanel: creating progress panel', 'log');
+        var labels = ssigGetLabels();
         var modal = document.createElement('div');
         modal.id = 'ssig-progress-modal';
         modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 20000; display: flex; align-items: center; justify-content: center;';
@@ -12563,7 +12893,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         titleContainer.style.cssText = 'display: flex; align-items: center; gap: 12px;';
         var title = document.createElement('h3');
         title.id = 'ssig-progress-title';
-        title.textContent = SSIG_LABELS.progressTitle;
+        title.textContent = labels.progressTitle;
         title.style.cssText = 'margin: 0; color: #111827; font-size: 18px; font-weight: 600;';
         var statusBadge = document.createElement('span');
         statusBadge.id = 'ssig-status-badge';
@@ -12741,6 +13071,19 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return 'hash_' + hash;
     }
 
+    function ssigGetSeenKeyForRowState(rs, row, visibleIndex) {
+        if (ssigState.mode !== 'start') {
+            return elogNormalizeName(rs.nameDisplay);
+        }
+        var rowNumber = '';
+        var cells = row ? row.querySelectorAll(SSIG_SELECTORS.cell) : [];
+        if (cells.length > 0) {
+            rowNumber = ssigCellText(cells[0]);
+        }
+        var content = row ? (row.textContent || '').replace(/\s+/g, ' ').trim() : '';
+        return [rowNumber, rs.pairKey, rs.startDateText || '', rs.staffSig && rs.staffSig.text || '', visibleIndex, content.length].join('|');
+    }
+
     function ssigScanVisibleRows(gridTable) {
         var rows = gridTable.querySelectorAll(SSIG_SELECTORS.row);
         var leftPanel = document.getElementById('ssig-left-panel');
@@ -12760,7 +13103,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (!rs.nameDisplay) {
                 continue;
             }
-            var normKey = elogNormalizeName(rs.nameDisplay);
+            var normKey = ssigGetSeenKeyForRowState(rs, row, ri);
             if (ssigState.seenKeys.has(normKey)) {
                 continue;
             }
@@ -12783,7 +13126,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 } else {
                     eligHint = 'Not Eligible';
                 }
-                var rightItem = createListItem(rs.nameDisplay, SSIG_LABELS.statusPending, 'pending', ssigState.leftPanelRowIndex);
+                var labels = ssigGetLabels();
+                var rightItem = createListItem(rs.nameDisplay, labels.statusPending, 'pending', ssigState.leftPanelRowIndex);
                 rightItem.setAttribute('data-rowkey', rowKey);
                 rightItem.setAttribute('data-pairkey', rs.pairKey);
                 rightItem.setAttribute('data-eligibility', eligHint);
@@ -12953,12 +13297,17 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function startSelectSignedScan() {
-        addLogMessage('startSelectSignedScan: beginning scan', 'log');
+        var labels = ssigGetLabels();
+        addLogMessage('startSelectSignedScan: beginning scan mode=' + ssigState.mode, 'log');
         ssigState.seenKeys = new Set();
         ssigState.rowStates = [];
         ssigState.leftPanelRowIndex = 0;
         ssigState.counters = { total: 0, selected: 0, already: 0, skippedPISigned: 0, skippedNotEligible: 0, strikethrough: 0, failures: 0, pending: 0 };
-        ssigDetectSignatureColumns();
+        if (ssigState.mode === 'start') {
+            ssigDetectStartCheckboxColumns();
+        } else {
+            ssigDetectSignatureColumns();
+        }
         ssigAutoScrollScan({
             onRow: function(rowState) {
                 addLogMessage('startSelectSignedScan: onRow name=' + rowState.nameDisplay, 'log');
@@ -12979,11 +13328,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 updateRightPanelSummarySsig(ssigState.counters);
                 var badge = document.getElementById('ssig-status-badge');
                 if (badge) {
-                    badge.textContent = SSIG_LABELS.selecting;
+                    badge.textContent = labels.selecting;
                 }
                 var titleEl = document.getElementById('ssig-progress-title');
                 if (titleEl) {
-                    titleEl.textContent = SSIG_LABELS.progressTitle + ' - Selecting';
+                    titleEl.textContent = labels.progressTitle + ' - Selecting';
                 }
                 ssigUpdateAriaLive('Scan complete. Processing ' + ssigState.rowStates.length + ' rows.');
                 processNextSsigRow(0);
@@ -12992,6 +13341,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function processNextSsigRow(index) {
+        var labels = ssigGetLabels();
         if (ssigState.stopRequested || !ssigState.isRunning) {
             addLogMessage('processNextSsigRow: stopped at index=' + index, 'warn');
             for (var si = index; si < ssigState.rowStates.length; si++) {
@@ -12999,7 +13349,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (stoppedRs._status !== 'finalized') {
                     stoppedRs._status = 'finalized';
                     ssigState.counters.pending--;
-                    updateRightPanelStatusSsig(stoppedRs._rowKey, SSIG_LABELS.statusStopped);
+                    updateRightPanelStatusSsig(stoppedRs._rowKey, labels.statusStopped);
                 }
             }
             updateRightPanelSummarySsig(ssigState.counters);
@@ -13013,12 +13363,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
         var rs = ssigState.rowStates[index];
         addLogMessage('processNextSsigRow: index=' + index + ' name=' + rs.nameDisplay + ' eligible=' + rs.eligible + ' reason=' + rs.reason, 'log');
-        if (rs.rowEl && rs.rowEl.querySelector('.log-entry--struckThrough')) {
+        if (ssigIsRowStrikethrough(rs.rowEl)) {
             addLogMessage('processNextSsigRow: skipping strikethrough entry: ' + rs.nameDisplay, 'log');
             rs._status = 'finalized';
             ssigState.counters.strikethrough++;
             ssigState.counters.pending--;
-            updateRightPanelStatusSsig(rs._rowKey, SSIG_LABELS.statusStrikethrough);
+            updateRightPanelStatusSsig(rs._rowKey, labels.statusStrikethrough);
             updateRightPanelSummarySsig(ssigState.counters);
             var tidStrike = setTimeout(function() {
                 processNextSsigRow(index + 1);
@@ -13026,11 +13376,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
             ssigState.timeouts.push(tidStrike);
             return;
         }
-        if (rs.reason === 'piSigned') {
+        if (ssigState.mode !== 'start' && rs.reason === 'piSigned') {
             rs._status = 'finalized';
             ssigState.counters.skippedPISigned++;
             ssigState.counters.pending--;
-            updateRightPanelStatusSsig(rs._rowKey, SSIG_LABELS.statusPISigned, 'PI: ' + rs.piSig.text);
+            updateRightPanelStatusSsig(rs._rowKey, labels.statusPISigned, 'PI: ' + rs.piSig.text);
             updateRightPanelSummarySsig(ssigState.counters);
             var tid1 = setTimeout(function() {
                 processNextSsigRow(index + 1);
@@ -13042,7 +13392,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
             rs._status = 'finalized';
             ssigState.counters.skippedNotEligible++;
             ssigState.counters.pending--;
-            updateRightPanelStatusSsig(rs._rowKey, SSIG_LABELS.statusNotEligible, 'Staff: ' + rs.staffSig.text);
+            var detail = ssigState.mode === 'start' ? ('Start Date: ' + (rs.startDateText || '-') + '; Staff Signature: ' + (rs.staffSig.text || '-')) : ('Staff: ' + rs.staffSig.text);
+            updateRightPanelStatusSsig(rs._rowKey, labels.statusNotEligible, detail);
             updateRightPanelSummarySsig(ssigState.counters);
             var tid2 = setTimeout(function() {
                 processNextSsigRow(index + 1);
@@ -13055,17 +13406,17 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (result === 'already') {
                 ssigState.counters.already++;
                 ssigState.counters.pending--;
-                updateRightPanelStatusSsig(rs._rowKey, SSIG_LABELS.statusAlready);
+                updateRightPanelStatusSsig(rs._rowKey, labels.statusAlready);
                 addLogMessage('processNextSsigRow: already checked name=' + rs.nameDisplay, 'log');
             } else if (result === true) {
                 ssigState.counters.selected++;
                 ssigState.counters.pending--;
-                updateRightPanelStatusSsig(rs._rowKey, SSIG_LABELS.statusSelected);
+                updateRightPanelStatusSsig(rs._rowKey, labels.statusSelected);
                 addLogMessage('processNextSsigRow: selected name=' + rs.nameDisplay, 'log');
             } else {
                 ssigState.counters.failures++;
                 ssigState.counters.pending--;
-                updateRightPanelStatusSsig(rs._rowKey, SSIG_LABELS.statusFailed);
+                updateRightPanelStatusSsig(rs._rowKey, labels.statusFailed);
                 addLogMessage('processNextSsigRow: failed name=' + rs.nameDisplay, 'warn');
             }
             updateRightPanelSummarySsig(ssigState.counters);
@@ -13077,17 +13428,18 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function finalizeSsigRun() {
+        var labels = ssigGetLabels();
         addLogMessage('finalizeSsigRun: selected=' + ssigState.counters.selected + ' already=' + ssigState.counters.already + ' piSigned=' + ssigState.counters.skippedPISigned + ' notEligible=' + ssigState.counters.skippedNotEligible + ' strikethrough=' + ssigState.counters.strikethrough + ' failed=' + ssigState.counters.failures, 'log');
         ssigSetAriaBusyOff();
         var badge = document.getElementById('ssig-status-badge');
         if (badge) {
-            badge.textContent = SSIG_LABELS.done;
+            badge.textContent = labels.done;
             badge.style.color = '#15803d';
             badge.style.background = '#dcfce7';
         }
         var titleEl = document.getElementById('ssig-progress-title');
         if (titleEl) {
-            titleEl.textContent = SSIG_LABELS.progressTitle + ' - Complete';
+            titleEl.textContent = labels.progressTitle + ' - Complete';
         }
         ssigUpdateAriaLive('Selection complete. Selected: ' + ssigState.counters.selected + ', Already: ' + ssigState.counters.already + ', PI Signed: ' + ssigState.counters.skippedPISigned + ', Not Eligible: ' + ssigState.counters.skippedNotEligible + ', Strikethrough: ' + ssigState.counters.strikethrough + ', Failed: ' + ssigState.counters.failures);
         ssigState.isRunning = false;
@@ -13097,6 +13449,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         addLogMessage('selectSignedCheckboxInit: starting feature', 'log');
         ssigState.focusReturnElement = document.getElementById('ssig-select-btn');
         resetSsigState();
+        ssigState.mode = 'signed';
         var presenceEl = document.querySelector(SSIG_SELECTORS.presenceCheck);
         if (!presenceEl) {
             addLogMessage('selectSignedCheckboxInit: page check failed, showing warning', 'warn');
@@ -13109,6 +13462,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
         ssigSetAriaBusyOn();
         ssigUpdateAriaLive(SSIG_LABELS.scanning);
         showCollectingDataPanel('ssig', SSIG_LABELS.progressTitle);
+        startSelectSignedScan();
+    }
+
+    function selectStartCheckboxInit() {
+        addLogMessage('selectStartCheckboxInit: starting feature', 'log');
+        ssigState.focusReturnElement = document.getElementById('sstart-select-btn');
+        resetSsigState();
+        ssigState.mode = 'start';
+        var presenceEl = document.querySelector(SSIG_SELECTORS.presenceCheck);
+        if (!presenceEl) {
+            addLogMessage('selectStartCheckboxInit: page check failed, showing warning', 'warn');
+            showSsigWarning();
+            return;
+        }
+        addLogMessage('selectStartCheckboxInit: page valid, opening progress panel', 'log');
+        ssigState.isRunning = true;
+        showSelectSignedCheckboxProgressPanel();
+        ssigSetAriaBusyOn();
+        ssigUpdateAriaLive(SSTART_LABELS.scanning);
+        showCollectingDataPanel('ssig', SSTART_LABELS.progressTitle);
         startSelectSignedScan();
     }
 
@@ -15066,13 +15439,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
         editMenuItemFallback: '.dropdown-menu li a, .dropdown-menu .dropdown-item, .dropdown-menu button',
         startDateInputContainer: 'date-time-popup, .test-datetime-popup',
         startDateInputTrigger: 'input, a[dropdowntoggle], [dropdowntoggle]',
-        datepickerContainer: 'date-time-popup .test-datetime-popup, date-time-popup .dropdown-menu, .test-datetime-popup.dropdown, datepicker, datepicker-inner',
+        datepickerContainer: 'date-time-popup .test-datetime-popup, date-time-popup .dropdown-menu, .test-datetime-popup.dropdown, datepicker, datepicker-inner, bs-datepicker-inline-container, .bs-datepicker',
         datepickerTitleBtn: 'bs-datepicker-navigation-view button.current, button.current',
         datepickerNavPrev: 'bs-datepicker-navigation-view button.previous, button.previous',
         datepickerNavNext: 'bs-datepicker-navigation-view button.next, button.next',
         datepickerDayCell: 'td[role="gridcell"] span[role="button"], td[role="gridcell"] button',
         datepickerDaySpan: 'span',
         datepickerDayMutedClass: 'text-muted',
+        datepickerDayOtherMonthClass: 'is-other-month',
         ariaLiveRegion: '.aria-live-region',
         mainPanelButtonTarget: '.main-gui-panel',
         saveButton: 'button.btn.btn-primary.test-submitBtn, .log-entry-form button.btn.btn-primary',
@@ -15121,7 +15495,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     };
 
     const STARTDATE_LABELS = {
-        featureButton: 'Add Start Date (DOA)',
+        featureButton: 'Add Start Date (DoA)',
         inputTitle: 'Add Start Date',
         warningTitle: 'Document Log Not Found',
         warningMessage: 'The current page does not contain the Document Log Entries table. Please navigate to the Document Log before using this feature.',
@@ -15148,7 +15522,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         statusDatepickerFailed: 'Datepicker Failed',
         statusDuplicate: 'Duplicate (ignored)',
         statusEnteringReason: 'Entering Reason',
-        reasonText: 'Add Start Date'
+        defaultReasonText: 'Update start date'
     };
 
     const STARTDATE_REGEX = {
@@ -15156,7 +15530,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         commaSplit: /[,]+/,
         dateFormatDash: /^(\d{1,2})-(\d{1,2})-(\d{4})$/,
         dateFormatSlash: /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/,
-        dateFormatTextual: /^(\d{1,2})\s*([A-Za-z]+)\s*(\d{4})$/
+        dateFormatTextual: /^(\d{1,2})\s*[-/ ]?\s*([A-Za-z]+)\s*[-/ ]?\s*(\d{4})$/
     };
 
     const STARTDATE_MONTHS = [
@@ -15206,6 +15580,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         prevAriaBusy: null,
         parsedNames: [],
         parsedDate: null,
+        reasonText: STARTDATE_LABELS.defaultReasonText,
         scannedNames: [],
         seenNormalizedNames: new Set(),
         scrollContainer: null,
@@ -15230,6 +15605,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         startDateState.prevAriaBusy = null;
         startDateState.parsedNames = [];
         startDateState.parsedDate = null;
+        startDateState.reasonText = STARTDATE_LABELS.defaultReasonText;
         startDateState.scannedNames = [];
         startDateState.seenNormalizedNames = new Set();
         startDateState.scrollContainer = null;
@@ -15611,6 +15987,23 @@ function showResponsibilitiesProgressPanel(rolesData) {
         dateInput.onblur = function() {
             dateInput.style.borderColor = '#d1d5db';
         };
+        var reasonLabel = document.createElement('label');
+        reasonLabel.setAttribute('for', 'startdate-reason-input');
+        reasonLabel.textContent = 'Reason';
+        reasonLabel.style.cssText = 'display: block; color: #374151; font-size: 13px; font-weight: 600; margin-bottom: 6px; margin-top: 12px;';
+        var reasonInput = document.createElement('input');
+        reasonInput.type = 'text';
+        reasonInput.id = 'startdate-reason-input';
+        reasonInput.value = STARTDATE_LABELS.defaultReasonText;
+        reasonInput.placeholder = STARTDATE_LABELS.defaultReasonText;
+        reasonInput.setAttribute('aria-label', 'Reason for start date update');
+        reasonInput.style.cssText = 'width: 100%; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 10px; background: #ffffff; color: #111827; font-size: 14px; font-family: Segoe UI, Tahoma, Geneva, Verdana, sans-serif; outline: none; transition: all 0.15s ease; box-sizing: border-box;';
+        reasonInput.onfocus = function() {
+            reasonInput.style.borderColor = '#2563eb';
+        };
+        reasonInput.onblur = function() {
+            reasonInput.style.borderColor = '#d1d5db';
+        };
         var continueButton = document.createElement('button');
         continueButton.textContent = 'Continue';
         continueButton.disabled = true;
@@ -15669,6 +16062,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             startDateState.parsedNames = parsedNames;
             startDateState.parsedDate = parsedDate;
+            startDateState.reasonText = reasonInput.value.trim() || STARTDATE_LABELS.defaultReasonText;
             addLogMessage('showStartDateInputPanel: parsedNames=' + parsedNames.length + ' date=' + parsedDate.displayMonthName + ' ' + parsedDate.day + ', ' + parsedDate.year, 'log');
             if (modal.parentNode) {
                 document.body.removeChild(modal);
@@ -15693,6 +16087,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             addLogMessage('showStartDateInputPanel: Clear All clicked', 'log');
             textarea.value = '';
             dateInput.value = '';
+            reasonInput.value = STARTDATE_LABELS.defaultReasonText;
             dateStatusDiv.textContent = '';
             continueButton.disabled = true;
             continueButton.style.opacity = '0.5';
@@ -15721,6 +16116,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.appendChild(dateLabel);
         container.appendChild(dateInput);
         container.appendChild(dateStatusDiv);
+        container.appendChild(reasonLabel);
+        container.appendChild(reasonInput);
         container.appendChild(buttonContainer);
         modal.appendChild(container);
         container.style.position = 'fixed';
@@ -16556,12 +16953,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 var intervalStep = 200;
                 checkInterval = setInterval(function() {
                     elapsed += intervalStep;
-                    var picker = startPopup.querySelector('datepicker, datepicker-inner, .test-date-picker');
+                    var picker = startPopup.querySelector('datepicker, datepicker-inner, .test-date-picker, bs-datepicker-inline-container, .bs-datepicker');
                     if (!picker) {
                         picker = startPopup.querySelector('.test-datetime-popup datepicker');
                     }
                     if (!picker) {
-                        picker = document.querySelector('datepicker');
+                        picker = document.querySelector('datepicker, datepicker-inner, .test-date-picker, bs-datepicker-inline-container, .bs-datepicker');
                     }
                     if (picker) {
                         clearInterval(checkInterval);
@@ -16661,6 +17058,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
         if (!picker) {
             picker = document.querySelector('.test-date-picker');
+        }
+        if (!picker) {
+            picker = document.querySelector('bs-datepicker-inline-container');
+        }
+        if (!picker) {
+            picker = document.querySelector('.bs-datepicker');
         }
         return picker;
     }
@@ -16767,6 +17170,44 @@ function showResponsibilitiesProgressPanel(rolesData) {
         step();
     }
 
+    function isStartDateDayButtonMuted(dayButton) {
+        if (!dayButton) {
+            return true;
+        }
+        if (dayButton.disabled || dayButton.getAttribute('aria-disabled') === 'true') {
+            return true;
+        }
+        if (dayButton.classList && dayButton.classList.contains(STARTDATE_SELECTORS.datepickerDayMutedClass)) {
+            return true;
+        }
+        if (dayButton.classList && dayButton.classList.contains(STARTDATE_SELECTORS.datepickerDayOtherMonthClass)) {
+            return true;
+        }
+        var parent = dayButton.parentElement;
+        while (parent && parent.tagName !== 'TABLE') {
+            if (parent.classList && parent.classList.contains(STARTDATE_SELECTORS.datepickerDayMutedClass)) {
+                return true;
+            }
+            if (parent.classList && parent.classList.contains(STARTDATE_SELECTORS.datepickerDayOtherMonthClass)) {
+                return true;
+            }
+            parent = parent.parentElement;
+        }
+        return false;
+    }
+
+    function getStartDateDayButtonNumber(dayButton) {
+        if (!dayButton) {
+            return null;
+        }
+        var dayText = (dayButton.textContent || '').trim();
+        var match = dayText.match(/^(\d{1,2})$/);
+        if (!match) {
+            return null;
+        }
+        return parseInt(match[1], 10);
+    }
+
     function selectDay(pickerEl, targetDay) {
         addLogMessage('selectDay: targetDay=' + targetDay, 'log');
         return new Promise(function(resolve) {
@@ -16781,37 +17222,20 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 addLogMessage('selectDay: found ' + dayButtons.length + ' day cell buttons', 'log');
                 var clicked = false;
                 for (var di = 0; di < dayButtons.length; di++) {
-                    var span = dayButtons[di].querySelector(STARTDATE_SELECTORS.datepickerDaySpan);
-                    if (!span) {
+                    var dayButton = dayButtons[di];
+                    if (isStartDateDayButtonMuted(dayButton)) {
                         continue;
                     }
-                    if (span.classList.contains(STARTDATE_SELECTORS.datepickerDayMutedClass)) {
-                        continue;
-                    }
-                    var dayText = span.textContent.trim();
-                    var dayNum = parseInt(dayText, 10);
+                    var dayNum = getStartDateDayButtonNumber(dayButton);
                     if (dayNum === targetDay) {
                         addLogMessage('selectDay: clicking day ' + dayNum, 'log');
-                        dayButtons[di].click();
+                        dayButton.click();
                         clicked = true;
                         break;
                     }
                 }
                 if (!clicked) {
-                    addLogMessage('selectDay: non-muted match not found, fallback scanning all buttons', 'log');
-                    for (var ai = 0; ai < dayButtons.length; ai++) {
-                        var allDayText = dayButtons[ai].textContent.trim();
-                        var allDayNum = parseInt(allDayText, 10);
-                        if (allDayNum === targetDay) {
-                            addLogMessage('selectDay: fallback clicking day ' + allDayNum, 'log');
-                            dayButtons[ai].click();
-                            clicked = true;
-                            break;
-                        }
-                    }
-                }
-                if (!clicked) {
-                    addLogMessage('selectDay: day ' + targetDay + ' not found in picker', 'warn');
+                    addLogMessage('selectDay: non-muted day ' + targetDay + ' not found in current month', 'warn');
                     resolve(false);
                     return;
                 }
@@ -16850,7 +17274,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 raw: t
             };
         }
-        var textMatch = t.match(/(\d{1,2})\s*([A-Za-z]+)\s*(\d{4})/);
+        var textMatch = t.match(/^(\d{1,2})\s*[-/ ]?\s*([A-Za-z]+)\s*[-/ ]?\s*(\d{4})$/);
         if (textMatch) {
             var tMonthStr = textMatch[2].toLowerCase();
             for (var mi = 0; mi < STARTDATE_MONTHS.length; mi++) {
@@ -17024,6 +17448,52 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function readStartDateFromActiveEditField() {
+        addLogMessage('readStartDateFromActiveEditField: reading active Start Date field', 'log');
+        var rawValue = getStartDateActiveEditFieldValue();
+        if (!rawValue) {
+            return null;
+        }
+        return parseDateString(rawValue);
+    }
+
+    function getStartDateActiveEditFieldValue() {
+        addLogMessage('getStartDateActiveEditFieldValue: reading active Start Date field value', 'log');
+        try {
+            var startPopup = findStartLabeledDatePopup();
+            if (startPopup && startPopup.parentElement) {
+                var scopedInput = startPopup.parentElement.querySelector('input[placeholder]');
+                if (scopedInput) {
+                    var scopedValue = (scopedInput.value || '').trim();
+                    addLogMessage('getStartDateActiveEditFieldValue: scoped input value="' + scopedValue + '"', 'log');
+                    if (scopedValue) {
+                        return scopedValue;
+                    }
+                }
+            }
+            var contextRoots = document.querySelectorAll(STARTDATE_SELECTORS.editContextRoot);
+            for (var ri = 0; ri < contextRoots.length; ri++) {
+                var root = contextRoots[ri];
+                if (root === document.body) {
+                    continue;
+                }
+                var inputs = root.querySelectorAll(STARTDATE_SELECTORS.startDateReadonlyInGrid);
+                for (var ii = 0; ii < inputs.length; ii++) {
+                    var val = (inputs[ii].value || '').trim();
+                    addLogMessage('getStartDateActiveEditFieldValue: fallback input value="' + val + '"', 'log');
+                    if (val) {
+                        return val;
+                    }
+                }
+            }
+            addLogMessage('getStartDateActiveEditFieldValue: no active Start Date value found', 'warn');
+            return '';
+        } catch (err) {
+            addLogMessage('getStartDateActiveEditFieldValue: error: ' + err.message, 'error');
+            return '';
+        }
+    }
+
     function isDateEqualToTarget(foundDateObj, targetDateObj) {
         if (!foundDateObj || !targetDateObj) {
             return false;
@@ -17033,6 +17503,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var dMatch = foundDateObj.d === targetDateObj.day;
         addLogMessage('isDateEqualToTarget: found=' + foundDateObj.y + '/' + foundDateObj.m0 + '/' + foundDateObj.d + ' target=' + targetDateObj.year + '/' + targetDateObj.monthIndex0 + '/' + targetDateObj.day + ' match=' + (yMatch && mMatch && dMatch), 'log');
         return yMatch && mMatch && dMatch;
+    }
+
+    function verifyStartDateInputBeforeSave(targetDateObj) {
+        var selectedRawValue = getStartDateActiveEditFieldValue();
+        var selectedDate = parseDateString(selectedRawValue);
+        if (!selectedDate) {
+            addLogMessage('verifyStartDateInputBeforeSave: date field could not be parsed after picker selection raw="' + (selectedRawValue || '') + '"', 'error');
+            return false;
+        }
+        if (!isDateEqualToTarget(selectedDate, targetDateObj)) {
+            addLogMessage('verifyStartDateInputBeforeSave: selected date mismatch; refusing to save raw=' + selectedDate.raw, 'error');
+            return false;
+        }
+        addLogMessage('verifyStartDateInputBeforeSave: selected date matches target', 'log');
+        return true;
+    }
+
+    function getStartDateReasonText() {
+        var reason = (startDateState.reasonText || '').trim();
+        return reason || STARTDATE_LABELS.defaultReasonText;
     }
 
     function findSaveButton() {
@@ -17206,7 +17696,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             addLogMessage('waitForReasonModalAndSubmit: filling reason textarea', 'log');
             textarea.focus();
-            textarea.value = STARTDATE_LABELS.reasonText;
+            textarea.value = getStartDateReasonText();
             textarea.dispatchEvent(new Event('input', { bubbles: true }));
             textarea.dispatchEvent(new Event('change', { bubbles: true }));
             addLogMessage('waitForReasonModalAndSubmit: dispatched input and change events', 'log');
@@ -17260,7 +17750,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     addLogMessage('waitForReasonModalAndSubmit: submit button still disabled after timeout, retrying input', 'warn');
                     textarea.value = '';
                     textarea.dispatchEvent(new Event('input', { bubbles: true }));
-                    textarea.value = STARTDATE_LABELS.reasonText;
+                    textarea.value = getStartDateReasonText();
                     textarea.dispatchEvent(new Event('input', { bubbles: true }));
                     textarea.dispatchEvent(new Event('change', { bubbles: true }));
                     textarea.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -17501,6 +17991,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
                         throw new Error('Day selection failed');
                     }
                     return startDateDelay(STARTDATE_TIMEOUTS.waitVerifyInputMs);
+                }).then(function() {
+                    if (!verifyStartDateInputBeforeSave(startDateState.parsedDate)) {
+                        throw new Error('Selected date verification failed');
+                    }
                 });
             })
                 .then(function() {
@@ -18598,10 +19092,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     // ─── End Update Role Responsibilities ────────────────────────────────────────
 
-    // ─── Update Automate (DOA) ───────────────────────────────────────────────────
+    // ─── Update Automate (DoA) ───────────────────────────────────────────────────
 
     const UPDATEDOA_LABELS = {
-        featureButton: 'Update Automate (DOA)', inputTitle: 'Update Automate (DOA)',
+        featureButton: 'Update Automate (DoA)', inputTitle: 'Update Automate (DoA)',
         warningTitle: 'DOA Automation Panel Not Found',
         warningMessage: 'The current page does not contain the DOA Automation team edit panel with the required sections. Please open the DoA automation modal so that the team members section is visible before using this feature.',
         statusPending: 'Pending', statusLocating: 'Locating', statusSettingRole: 'Setting Role', statusSettingTasks: 'Setting Tasks',
@@ -19146,7 +19640,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (updateDoaState.focusReturnElement) { updateDoaState.focusReturnElement.focus(); }
     }
 
-    // ─── End Update Automate (DOA) ────────────────────────────────────────────────
+    // ─── End Update Automate (DoA) ────────────────────────────────────────────────
 
     function addStartDateInit() {
         addLogMessage('addStartDateInit: starting feature', 'log');
@@ -19365,8 +19859,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
         modalObserver: null,
         modalAutofillTimer: null,
         latestLog: null,
+        latestLogCandidates: [],
         selectedTab: 'buttons',
         legendWaiting: false,
+        legendRequestUrl: '',
+        legendRequestPromise: null,
+        legendResolvedUrl: '',
+        legendFailedUrl: '',
+        legendFailedAt: 0,
         persisted: JSON.parse(JSON.stringify(TLOG_PERSISTENCE_DEFAULT)),
         staffList: {
             pis: [],
@@ -19384,18 +19884,19 @@ function showResponsibilitiesProgressPanel(rolesData) {
     };
 
     const BUTTON_DEFS = [
-        { id: 'add-signatures-btn', label: 'Add Signatures', handler: function() { startAddSignaturesFlow(); } },
-        { id: 'elog-staff-entries-btn', label: 'Add Training Log Staff Entries', handler: function() { addELogStaffEntriesInit(); } },
-        { id: 'clean-resp-btn', label: 'Add Study Resp. (DoA Template)', handler: function() { cleanResponsibilityInit(); } },
-        { id: 'doa-staff-entries-btn', label: 'Add DoA Log Staff Entries', handler: function() { addDoALogStaffEntriesInit(); } },
-        { id: 'resp-set-btn', label: 'Set Role Resp.', handler: function() { setResponsibilitiesInit(); } },
+        { id: 'add-signatures-btn', label: 'Add Signers (non-Training Log)', handler: function() { startAddSignaturesFlow(); } },
+        { id: 'elog-staff-entries-btn', label: 'Add Staff Entries (Training Log)', handler: function() { addELogStaffEntriesInit(); } },
+        { id: 'clean-resp-btn', label: 'Set Resp. (Template)', handler: function() { cleanResponsibilityInit(); } },
+        { id: 'doa-staff-entries-btn', label: 'Add Staff Entries (DoA)', handler: function() { addDoALogStaffEntriesInit(); } },
+        { id: 'resp-set-btn', label: 'Set Role (Template)', handler: function() { setResponsibilitiesInit(); } },
         { id: 'cb-select-btn', label: 'Select Checkboxes', handler: function() { selectCheckboxesInit(); } },
-        { id: 'startdate-btn', label: 'Add Start Date (DOA)', handler: function() { addStartDateInit(); } },
-        { id: 'ssig-select-btn', label: 'Select Signed Checkbox (DOA)', handler: function() { selectSignedCheckboxInit(); } },
+        { id: 'startdate-btn', label: 'Add Start Date (DoA)', handler: function() { addStartDateInit(); } },
+        { id: 'ssig-select-btn', label: 'Select PI Signature (DoA)', handler: function() { selectSignedCheckboxInit(); } },
+        { id: 'sstart-select-btn', label: 'Select Staff Signature (DoA)', handler: function() { selectStartCheckboxInit(); } },
         { id: 'tlog-btn', label: 'Get Log Data', handler: function() { getTrainingLogInit(); } },
         { id: 'verify-names-btn', label: 'Verify Names', handler: function() { verifyNamesInit(); } },
-        { id: 'updaterole-btn', label: 'Update Role Resp. (DOA)', handler: function() { updateRoleResponsibilitiesInit(); } },
-        { id: 'updatedoa-btn', label: 'Update Automate (DOA)', handler: function() { updateDoaResponsibilitiesInit(); } }
+        { id: 'updaterole-btn', label: 'Update Role Resp. (DoA)', handler: function() { updateRoleResponsibilitiesInit(); } },
+        { id: 'updatedoa-btn', label: 'Update Automate (DoA)', handler: function() { updateDoaResponsibilitiesInit(); } }
     ];
 
     var cfgState = {
@@ -21139,6 +21640,22 @@ function showResponsibilitiesProgressPanel(rolesData) {
         });
     }
 
+    function fetchWithTimeout(url, options, timeoutMs) {
+        options = options || {};
+        timeoutMs = timeoutMs || 4500;
+        if (typeof AbortController === 'undefined') {
+            return fetch(url, options);
+        }
+        var controller = new AbortController();
+        var timeoutId = setTimeout(function() {
+            controller.abort();
+        }, timeoutMs);
+        options.signal = controller.signal;
+        return fetch(url, options).finally(function() {
+            clearTimeout(timeoutId);
+        });
+    }
+
     function extractLegendTextFromHtml(html) {
         if (!html) return null;
         try {
@@ -21172,7 +21689,36 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
-    function fetchLegendFromTrainingLog(log) {
+    function getSecondLatestTrainingLogForLegend(primaryLog) {
+        var candidates = trainingLogState.latestLogCandidates || [];
+        var primaryHref = primaryLog ? resolveTrainingLogHref(primaryLog.href || '') : '';
+        var primaryText = primaryLog ? normalizeTrainingLogName(primaryLog.text || '') : '';
+        for (var i = 0; i < candidates.length; i++) {
+            var cand = candidates[i];
+            if (!cand || !cand.href) continue;
+            var candHref = resolveTrainingLogHref(cand.href || '');
+            var candText = normalizeTrainingLogName(cand.text || '');
+            if (primaryHref && candHref === primaryHref) continue;
+            if (primaryText && candText === primaryText) continue;
+            return cand;
+        }
+        return null;
+    }
+
+    function fetchLegendFromFallbackTrainingLog(primaryLog) {
+        var fallbackLog = getSecondLatestTrainingLogForLegend(primaryLog);
+        if (!fallbackLog) {
+            addLogMessage('Training Log: no 2nd latest log available for legend fallback', 'log');
+            return Promise.resolve(false);
+        }
+        addLogMessage('Training Log: latest log had no legend, trying 2nd latest log for legend: ' + fallbackLog.text, 'log');
+        return fetchLegendFromTrainingLog(fallbackLog, { allowFallback: false, isFallback: true });
+    }
+
+    function fetchLegendFromTrainingLog(log, options) {
+        options = options || {};
+        var allowFallback = options.allowFallback !== false;
+        var isFallback = options.isFallback === true;
         if (!log || !log.href) {
             var currentLegend = extractLegendText();
             if (currentLegend) {
@@ -21184,8 +21730,22 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
         var url = resolveTrainingLogHref(log.href);
         if (!url) return Promise.resolve(false);
-        addLogMessage('Training Log: fetching latest log for legend: ' + url, 'log');
-        return fetch(url, { credentials: 'include' })
+        if (!isFallback && trainingLogState.persisted.legends && trainingLogState.persisted.latestTrainingLog === log.text && trainingLogState.legendResolvedUrl === url) {
+            addLogMessage('Training Log: using cached legend for latest log', 'log');
+            return Promise.resolve(true);
+        }
+        if (trainingLogState.legendRequestPromise && trainingLogState.legendRequestUrl === url) {
+            addLogMessage('Training Log: reusing active legend extraction request', 'log');
+            return trainingLogState.legendRequestPromise;
+        }
+        var now = Date.now();
+        if (!trainingLogState.persisted.legends && trainingLogState.legendFailedUrl === url && now - trainingLogState.legendFailedAt < 5000) {
+            addLogMessage('Training Log: recent legend miss, waiting before retry', 'log');
+            return Promise.resolve(false);
+        }
+        addLogMessage('Training Log: fetching ' + (isFallback ? '2nd latest' : 'latest') + ' log for legend: ' + url, 'log');
+        trainingLogState.legendRequestUrl = url;
+        trainingLogState.legendRequestPromise = fetchWithTimeout(url, { credentials: 'include' }, 3500)
             .then(function(resp) {
                 if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 return resp.text();
@@ -21193,26 +21753,63 @@ function showResponsibilitiesProgressPanel(rolesData) {
             .then(function(html) {
                 var legendText = extractLegendTextFromHtml(html);
                 if (!legendText) {
-                    addLogMessage('Training Log: no legend found in fetched latest log', 'log');
-                    return loadLegendFromHiddenTrainingLogFrame(url);
+                    addLogMessage('Training Log: no legend found in fetched ' + (isFallback ? '2nd latest' : 'latest') + ' log', 'log');
+                    return loadLegendFromHiddenTrainingLogFrame(url, isFallback ? '2nd latest' : 'latest');
                 }
                 savePersistedLegend(legendText);
-                addLogMessage('Training Log: legend pulled from latest log in background', 'log');
+                trainingLogState.legendResolvedUrl = url;
+                trainingLogState.legendFailedUrl = '';
+                trainingLogState.legendFailedAt = 0;
+                addLogMessage('Training Log: legend pulled from ' + (isFallback ? '2nd latest' : 'latest') + ' log in background', 'log');
                 return true;
             })
             .catch(function(e) {
                 addLogMessage('Training Log: background legend fetch failed: ' + e, 'error');
-                return loadLegendFromHiddenTrainingLogFrame(url);
+                return loadLegendFromHiddenTrainingLogFrame(url, isFallback ? '2nd latest' : 'latest');
+            })
+            .then(function(found) {
+                if (!found && allowFallback) {
+                    return fetchLegendFromFallbackTrainingLog(log).then(function(fallbackFound) {
+                        return {
+                            found: fallbackFound,
+                            resolvedUrl: fallbackFound ? resolveTrainingLogHref((getSecondLatestTrainingLogForLegend(log) || {}).href || '') : ''
+                        };
+                    });
+                }
+                return {
+                    found: found,
+                    resolvedUrl: found ? url : ''
+                };
+            })
+            .then(function(result) {
+                var found = !!(result && result.found);
+                if (found) {
+                    trainingLogState.legendResolvedUrl = result.resolvedUrl || url;
+                    trainingLogState.legendFailedUrl = '';
+                    trainingLogState.legendFailedAt = 0;
+                } else {
+                    trainingLogState.legendFailedUrl = url;
+                    trainingLogState.legendFailedAt = Date.now();
+                }
+                return found;
+            })
+            .finally(function() {
+                if (trainingLogState.legendRequestUrl === url) {
+                    trainingLogState.legendRequestUrl = '';
+                    trainingLogState.legendRequestPromise = null;
+                }
             });
+        return trainingLogState.legendRequestPromise;
     }
 
-    function loadLegendFromHiddenTrainingLogFrame(url) {
+    function loadLegendFromHiddenTrainingLogFrame(url, label) {
         return new Promise(function(resolve) {
             if (!url) {
                 resolve(false);
                 return;
             }
-            addLogMessage('Training Log: opening latest log in hidden frame for legend', 'log');
+            label = label || 'latest';
+            addLogMessage('Training Log: opening ' + label + ' log in hidden frame for legend', 'log');
             var iframe = document.createElement('iframe');
             iframe.setAttribute('aria-hidden', 'true');
             iframe.style.cssText = 'position: fixed; width: 1px; height: 1px; left: -9999px; top: -9999px; opacity: 0; pointer-events: none; border: 0;';
@@ -21236,7 +21833,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     var text = extractLegendText(legendEl);
                     if (!text) return false;
                     savePersistedLegend(text);
-                    addLogMessage('Training Log: legend pulled from hidden latest log', 'log');
+                    addLogMessage('Training Log: legend pulled from hidden ' + label + ' log', 'log');
                     cleanup(true);
                     return true;
                 } catch (e) {
@@ -21245,9 +21842,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     return false;
                 }
             }
+            pollTimer = setInterval(tryReadLegend, 200);
             iframe.onload = function() {
-                if (tryReadLegend()) return;
-                pollTimer = setInterval(tryReadLegend, 500);
+                tryReadLegend();
             };
             iframe.onerror = function() {
                 addLogMessage('Training Log: hidden latest log frame failed to load', 'error');
@@ -21256,9 +21853,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
             timeoutTimer = setTimeout(function() {
                 addLogMessage('Training Log: hidden latest log legend wait timed out', 'warn');
                 cleanup(false);
-            }, 12000);
+            }, 8000);
             iframe.src = url;
             document.body.appendChild(iframe);
+            setTimeout(tryReadLegend, 0);
         });
     }
 
@@ -21596,7 +22194,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var candidates = [];
         var seen = new Set();
         addRenderedTrainingLogCandidates(candidates, seen, 0);
-        return rankTrainingLogCandidates(candidates);
+        var best = rankTrainingLogCandidates(candidates);
+        trainingLogState.latestLogCandidates = candidates.slice();
+        return best;
     }
 
     function getTrainingLogVirtualScrollViewports() {
@@ -21652,7 +22252,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 viewport.dispatchEvent(new Event('scroll', { bubbles: true }));
             }
         }
-        return rankTrainingLogCandidates(candidates);
+        var best = rankTrainingLogCandidates(candidates);
+        trainingLogState.latestLogCandidates = candidates.slice();
+        return best;
     }
 
     function getTrainingLogStudyMatchScore(candidate) {
@@ -22108,8 +22710,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
             {
                 title: 'Document Log',
                 features: [
-                    { label: 'Add Signatures', desc: 'Automatically adds signature entries to the document log for selected staff members — no manual clicking through each person.' },
-                    { label: 'Add Training Log Staff Entries', desc: 'Adds staff entries to the electronic training log (eLog) in bulk. Enter a list of names and the automator fills them in for you.' },
+                    { label: 'Add Signers (non-Training Log)', desc: 'Automatically adds signature entries to the document log for selected staff members — no manual clicking through each person.' },
+                    { label: 'Add Staff Entries (Training Log)', desc: 'Adds staff entries to the electronic training log (eLog) in bulk. Enter a list of names and the automator fills them in for you.' },
                     { label: 'Get Log Data', desc: 'Retrieves and displays training log data from the current document, useful for reviewing or verifying log entries.' },
                     { label: 'Verify Names', desc: 'Checks that staff names in the log match expected values and highlights any mismatches for review.' }
                 ]
@@ -22117,18 +22719,19 @@ function showResponsibilitiesProgressPanel(rolesData) {
             {
                 title: 'Delegation of Authority (DoA)',
                 features: [
-                    { label: 'Add DoA Log Staff Entries', desc: 'Adds staff entries to the Delegation of Authority log in bulk, saving you from entering each person manually.' },
-                    { label: 'Set Role Resp.', desc: 'Sets the role & responsibilities in the delegation log template. Useful for assigning tasks to all roles all at once.' },
-                    { label: 'Add Start Date (DOA)', desc: 'Automatically fills in the start date field for DoA log entries so you don\'t have to enter it manually for each row.' },
-                    { label: 'Select Signed Checkbox (DOA)', desc: 'Selects the checkbox for rows that have staff signatures. This is used to request PI Signatures for Start Date.' },
-                    { label: 'Update Role Resp. (DOA)', desc: 'Updates existing role responsibilities in the DoA log, replacing old values with new ones across multiple entries at once.' },
-                    { label: 'Update Automate (DOA)', desc: 'Automatically sets the study role and responsibilities for each team member in the DoA automation team edit panel, using pasted tab-separated staff data.' }
+                    { label: 'Add Staff Entries (DoA)', desc: 'Adds staff entries to the Delegation of Authority log in bulk, saving you from entering each person manually.' },
+                    { label: 'Set Role (Template)', desc: 'Sets the role & responsibilities in the delegation log template. Useful for assigning tasks to all roles all at once.' },
+                    { label: 'Add Start Date (DoA)', desc: 'Automatically fills in the start date field for DoA log entries so you don\'t have to enter it manually for each row.' },
+                    { label: 'Select PI Signature (DoA)', desc: 'Selects the checkbox for rows that have staff signatures. This is used to request PI Signatures for Start Date.' },
+                    { label: 'Select Staff Signature (DoA)', desc: 'Selects rows that have a Start Date and an Unrequested Staff Signature, while skipping strikethrough rows.' },
+                    { label: 'Update Role Resp. (DoA)', desc: 'Updates existing role responsibilities in the DoA log, replacing old values with new ones across multiple entries at once.' },
+                    { label: 'Update Automate (DoA)', desc: 'Automatically sets the study role and responsibilities for each team member in the DoA automation team edit panel, using pasted tab-separated staff data.' }
                 ]
             },
             {
                 title: 'Task & Responsibility Management',
                 features: [
-                    { label: 'Add Study Resp. (DoA Template)', desc: 'Cleans a pasted numbered responsibility list, switches the DoA Template Study Responsibilities step to Numbers, and inserts each item into empty fields.' },
+                    { label: 'Set Resp. (Template)', desc: 'Cleans a pasted numbered responsibility list, switches the DoA Template Study Responsibilities step to Numbers, and inserts each item into empty fields.' },
                     { label: 'Select Checkboxes', desc: 'Automatically selects specified checkboxes on the current page based on criteria you provide, or bulk select all.' }
                 ]
             },
@@ -24443,7 +25046,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     `;
 
         const title = document.createElement('h3');
-        title.textContent = 'Add Signatures';
+        title.textContent = 'Add Signers (non-Training Log)';
         title.style.cssText = `
         margin: 0;
         color: #111827;
@@ -24610,7 +25213,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function startAddSignaturesFlow() {
-        addLogMessage('Start Add Signatures flow clicked', 'log');
+        addLogMessage('Start Add Signers (non-Training Log) flow clicked', 'log');
         addLogMessage('Validating if user is on the Request Signatures page', 'log');
         const isOnSignaturePage = validateSignaturePage();
         if (isOnSignaturePage) {
