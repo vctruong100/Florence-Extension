@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.45
+// Version: 2.5.41
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -24436,7 +24436,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var deleteAllBtn = document.createElement('button');
         deleteAllBtn.textContent = 'Delete All';
         deleteAllBtn.style.cssText = 'background: #fff1f2; border: 1px solid #fecdd3; color: #be123c; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.15s ease;';
-        deleteAllBtn.onmouseover = function() { deleteAllBtn.style.background = '#ffe4e6'; };
+        deleteAllBtn.onmouseover = function() { if (!deleteAllBtn.disabled) deleteAllBtn.style.background = '#ffe4e6'; };
         deleteAllBtn.onmouseout = function() { deleteAllBtn.style.background = '#fff1f2'; };
         deleteAllBtn.onclick = function() { confirmDeleteAllStudies(); };
 
@@ -25191,217 +25191,16 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     const FLORENCE_SIDEBAR_WIDTH = 360;
-    const FLORENCE_LAYOUT_ATTR = 'data-florence-layout-offset';
-    const FLORENCE_LAYOUT_STYLE_ID = 'florence-sidebar-layout-style';
-    let florenceSidebarOffsetObserver = null;
-    let florenceSidebarOffsetTimer = null;
-    let florenceSidebarOffsetActive = false;
-
-    function florenceIsOwnElement(el) {
-        if (!el || el.nodeType !== 1) return true;
-        if (el.id === FLORENCE_GUI_ID || el.id === FLORENCE_ROOT_ID || el.id === FLORENCE_LAYOUT_STYLE_ID) return true;
-        if (el.closest && (el.closest('#' + FLORENCE_GUI_ID) || el.closest('#' + FLORENCE_ROOT_ID))) return true;
-        if (el.closest && el.closest('[' + FLORENCE_DATA_ATTR + ']')) return true;
-        return false;
-    }
-
-    function florenceIsVisibleElement(el) {
-        if (!el || el.nodeType !== 1) return false;
-        var rect = el.getBoundingClientRect();
-        if (!rect || rect.width < 1 || rect.height < 1) return false;
-        var style = window.getComputedStyle(el);
-        if (!style || style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0) return false;
-        return true;
-    }
-
-    function florenceStoreOriginalStyle(el) {
-        if (!el || el.hasAttribute(FLORENCE_LAYOUT_ATTR)) return;
-        var computed = window.getComputedStyle(el);
-        el.setAttribute(FLORENCE_LAYOUT_ATTR, JSON.stringify({
-            right: el.style.right || '',
-            width: el.style.width || '',
-            maxWidth: el.style.maxWidth || '',
-            transform: el.style.transform || '',
-            computedTransform: computed && computed.transform && computed.transform !== 'none' ? computed.transform : '',
-            marginRight: el.style.marginRight || '',
-            paddingRight: el.style.paddingRight || '',
-            boxSizing: el.style.boxSizing || ''
-        }));
-    }
-
-    function florenceRestoreOffsetElement(el) {
-        if (!el || !el.hasAttribute(FLORENCE_LAYOUT_ATTR)) return;
-        try {
-            var original = JSON.parse(el.getAttribute(FLORENCE_LAYOUT_ATTR) || '{}');
-            el.style.right = original.right || '';
-            el.style.width = original.width || '';
-            el.style.maxWidth = original.maxWidth || '';
-            el.style.transform = original.transform || '';
-            el.style.marginRight = original.marginRight || '';
-            el.style.paddingRight = original.paddingRight || '';
-            el.style.boxSizing = original.boxSizing || '';
-        } catch (e) {
-            el.style.right = '';
-            el.style.width = '';
-            el.style.maxWidth = '';
-            el.style.transform = '';
-            el.style.marginRight = '';
-            el.style.paddingRight = '';
-            el.style.boxSizing = '';
-        }
-        el.removeAttribute(FLORENCE_LAYOUT_ATTR);
-    }
-
-    function florenceEnsureSidebarLayoutStyle() {
-        if (document.getElementById(FLORENCE_LAYOUT_STYLE_ID)) return;
-        var style = document.createElement('style');
-        style.id = FLORENCE_LAYOUT_STYLE_ID;
-        style.textContent = [
-            'html[data-florence-sidebar-visible="true"] { padding-right: ' + FLORENCE_SIDEBAR_WIDTH + 'px !important; box-sizing: border-box !important; }',
-            'html[data-florence-sidebar-visible="true"] .cdk-overlay-container { right: ' + FLORENCE_SIDEBAR_WIDTH + 'px !important; width: calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px) !important; }'
-        ].join('\n');
-        document.head.appendChild(style);
-    }
-
-    function florenceShiftFixedChrome() {
-        var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-        if (!viewportWidth) return;
-        var candidates = document.querySelectorAll('body *');
-        for (var i = 0; i < candidates.length; i++) {
-            var el = candidates[i];
-            if (florenceIsOwnElement(el) || !florenceIsVisibleElement(el)) continue;
-            // Modal shells and their backdrops have their own positioning model.
-            // Let the dialog pass handle the outer shell only; never resize a
-            // full-screen backdrop or a child inside an already-shifted modal.
-            if (el.matches && el.matches('.modal-backdrop, .cdk-overlay-backdrop, [aria-hidden="true"].modal-backdrop')) {
-                // Clean up offsets written by an older refresh before leaving
-                // the backdrop under the page's own full-viewport layout.
-                florenceRestoreOffsetElement(el);
-                continue;
-            }
-            if (el.closest && el.closest('.modal, modal-container, [role="dialog"], [aria-modal="true"], .cdk-overlay-pane')) continue;
-            var computed = window.getComputedStyle(el);
-            if (!computed) continue;
-            var rect = el.getBoundingClientRect();
-            var tagName = (el.tagName || '').toLowerCase();
-            var className = String(el.className || '');
-            var isLikelyTopChrome = rect.top <= 120 && rect.left <= 4 && rect.right >= viewportWidth - 8 && rect.height <= 180;
-            var isTopNavigation = el.matches && el.matches('nav[aria-label="Top Navigation Bar"], .test-navbar-container');
-            var isNamedNavigation = isTopNavigation || /header|navbar|navigation|topbar|toolbar|app-header|page-header|site-header|main-header|c-header|c-navbar/i.test(className) || tagName === 'header' || tagName === 'nav';
-            var isTopWideNavigation = isNamedNavigation && rect.top <= 160 && rect.width >= Math.min(viewportWidth - 20, viewportWidth * 0.45);
-            var overlapsSidebar = rect.right > viewportWidth - FLORENCE_SIDEBAR_WIDTH + 8 && rect.left < viewportWidth - FLORENCE_SIDEBAR_WIDTH;
-            var isEligiblePosition = computed.position === 'fixed' || computed.position === 'sticky' || isTopWideNavigation;
-            if (!isEligiblePosition || (!isLikelyTopChrome && !overlapsSidebar && !isTopWideNavigation)) continue;
-            florenceStoreOriginalStyle(el);
-            if (computed.position === 'fixed' || computed.position === 'sticky' || isTopNavigation) {
-                el.style.right = FLORENCE_SIDEBAR_WIDTH + 'px';
-                el.style.width = 'calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px)';
-                el.style.maxWidth = 'calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px)';
-                el.style.boxSizing = 'border-box';
-            } else {
-                el.style.maxWidth = 'calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px)';
-                if (isTopWideNavigation || isLikelyTopChrome) {
-                    el.style.paddingRight = FLORENCE_SIDEBAR_WIDTH + 'px';
-                    el.style.boxSizing = 'border-box';
-                }
-            }
-        }
-    }
-
-    function florenceShiftDialogContent() {
-        var modalSelectors = [
-            'modal-container[role="dialog"]',
-            '.modal.show[role="dialog"]',
-            '[role="dialog"]',
-            '[aria-modal="true"]'
-        ].join(',');
-        var nodes = document.querySelectorAll(modalSelectors);
-        var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
-        for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            if (florenceIsOwnElement(el) || !florenceIsVisibleElement(el)) continue;
-            var dialogAncestor = el.parentElement ? el.parentElement.closest(modalSelectors) : null;
-            if (dialogAncestor && !florenceIsOwnElement(dialogAncestor) && florenceIsVisibleElement(dialogAncestor)) {
-                continue;
-            }
-            var rect = el.getBoundingClientRect();
-            if (rect.width >= viewportWidth - 20 && rect.height >= (window.innerHeight || 0) - 20) {
-                continue;
-            }
-            var computed = window.getComputedStyle(el);
-            var isDialogLike = /dialog|modal|overlay/i.test(el.className || '') || el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true';
-            if (!isDialogLike) continue;
-            florenceStoreOriginalStyle(el);
-            var original = {};
-            try {
-                original = JSON.parse(el.getAttribute(FLORENCE_LAYOUT_ATTR) || '{}');
-            } catch (e) {
-                original = {};
-            }
-            var originalTransform = original.transform || '';
-            var shift = ' translateX(-' + Math.round(FLORENCE_SIDEBAR_WIDTH / 2) + 'px)';
-            var baseTransform = originalTransform || original.computedTransform || '';
-            el.style.transform = baseTransform + shift;
-            // Keep the backdrop and modal viewport full-size. Only the modal
-            // shell is translated, so its centered dialog moves left without
-            // changing the backdrop's coverage or repeatedly shrinking it.
-            el.style.right = '';
-            el.style.width = '';
-            el.style.maxWidth = '';
-        }
-    }
-
-    function florenceApplyOffsetToDynamicElements() {
-        if (!florenceSidebarOffsetActive) return;
-        florenceShiftFixedChrome();
-        florenceShiftDialogContent();
-    }
-
-    function florenceScheduleSidebarOffsetRefresh() {
-        if (!florenceSidebarOffsetActive) return;
-        if (florenceSidebarOffsetTimer) clearTimeout(florenceSidebarOffsetTimer);
-        florenceSidebarOffsetTimer = setTimeout(function() {
-            florenceSidebarOffsetTimer = null;
-            florenceApplyOffsetToDynamicElements();
-        }, 80);
-    }
 
     function applySidebarOffset() {
-        florenceSidebarOffsetActive = true;
-        florenceEnsureSidebarLayoutStyle();
         if (document.documentElement) {
-            document.documentElement.setAttribute('data-florence-sidebar-visible', 'true');
+            document.documentElement.style.paddingRight = FLORENCE_SIDEBAR_WIDTH + 'px';
         }
-        florenceApplyOffsetToDynamicElements();
-        if (!florenceSidebarOffsetObserver && document.body) {
-            florenceSidebarOffsetObserver = new MutationObserver(florenceScheduleSidebarOffsetRefresh);
-            florenceSidebarOffsetObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'aria-hidden'] });
-        }
-        window.addEventListener('resize', florenceScheduleSidebarOffsetRefresh);
     }
 
     function removeSidebarOffset() {
-        florenceSidebarOffsetActive = false;
-        if (florenceSidebarOffsetTimer) {
-            clearTimeout(florenceSidebarOffsetTimer);
-            florenceSidebarOffsetTimer = null;
-        }
-        if (florenceSidebarOffsetObserver) {
-            florenceSidebarOffsetObserver.disconnect();
-            florenceSidebarOffsetObserver = null;
-        }
-        window.removeEventListener('resize', florenceScheduleSidebarOffsetRefresh);
         if (document.documentElement) {
-            document.documentElement.removeAttribute('data-florence-sidebar-visible');
             document.documentElement.style.paddingRight = '';
-        }
-        var shifted = document.querySelectorAll('[' + FLORENCE_LAYOUT_ATTR + ']');
-        for (var i = 0; i < shifted.length; i++) {
-            florenceRestoreOffsetElement(shifted[i]);
-        }
-        var style = document.getElementById(FLORENCE_LAYOUT_STYLE_ID);
-        if (style && style.parentNode) {
-            style.parentNode.removeChild(style);
         }
     }
 
