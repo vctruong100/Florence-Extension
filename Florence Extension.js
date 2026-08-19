@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.38
+// Version: 2.5.45
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -15456,6 +15456,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         editContextRoot: '.log-entry-form, form.log-entry-form, .document-log-entry-edit, .modal.show, body',
         memberDisplayInEdit: 'input.filtered-select__input[placeholder*="Team Member"], .filtered-select__input[readonly], .filtered-select__display, [data-test="member-display"], .log-entry-form__member .form-control[readonly]',
         startDateReadonlyInGrid: '.test-date-time-picker-3[placeholder*="Start Date"], input[placeholder="Start Date"]',
+        endDateReadonlyInGrid: '.test-date-time-picker-6[placeholder*="End Date"], input[placeholder="End Date"]',
         gridDateCellText: '.u-text-overflow-ellipsis, span, div',
         overlayOrSpinner: '.loading, .spinner, .overlay, .cdk-overlay-container',
         reasonModal: 'section.test-reasonModal',
@@ -15589,12 +15590,15 @@ function showResponsibilitiesProgressPanel(rolesData) {
         userScrollPaused: false,
         lastAutoScrollTime: 0,
         leftPanelRowIndex: 0,
+        fieldMode: 'start',
+        activeDatePopup: null,
         counters: { total: 0, saved: 0, alreadySet: 0, notFound: 0, failures: 0, pending: 0 },
         timer: null
     };
 
     function resetStartDateState() {
         addLogMessage('resetStartDateState: resetting state', 'log');
+        var fieldMode = startDateState.fieldMode || 'start';
         startDateState.isRunning = false;
         startDateState.stopRequested = false;
         startDateState.observers = [];
@@ -15605,7 +15609,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         startDateState.prevAriaBusy = null;
         startDateState.parsedNames = [];
         startDateState.parsedDate = null;
-        startDateState.reasonText = STARTDATE_LABELS.defaultReasonText;
+        startDateState.reasonText = getStartDateFieldConfig().defaultReasonText;
         startDateState.scannedNames = [];
         startDateState.seenNormalizedNames = new Set();
         startDateState.scrollContainer = null;
@@ -15614,6 +15618,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         startDateState.userScrollPaused = false;
         startDateState.lastAutoScrollTime = 0;
         startDateState.leftPanelRowIndex = 0;
+        startDateState.fieldMode = fieldMode;
+        startDateState.activeDatePopup = null;
         startDateState.counters = {
             total: 0,
             saved: 0,
@@ -15622,6 +15628,36 @@ function showResponsibilitiesProgressPanel(rolesData) {
             failures: 0,
             pending: 0
         };
+    }
+
+    function getStartDateFieldConfig() {
+        if (startDateState.fieldMode === 'end') {
+            return {
+                mode: 'end',
+                featureButton: 'Add End Date (DoA)',
+                inputTitle: 'Add End Date',
+                fieldLabel: 'End Date',
+                fieldShort: 'End',
+                readonlySelector: STARTDATE_SELECTORS.endDateReadonlyInGrid,
+                placeholderToken: 'end',
+                defaultReasonText: 'Update end date'
+            };
+        }
+        return {
+            mode: 'start',
+            featureButton: STARTDATE_LABELS.featureButton,
+            inputTitle: STARTDATE_LABELS.inputTitle,
+            fieldLabel: 'Start Date',
+            fieldShort: 'Start',
+            readonlySelector: STARTDATE_SELECTORS.startDateReadonlyInGrid,
+            placeholderToken: 'start',
+            defaultReasonText: STARTDATE_LABELS.defaultReasonText
+        };
+    }
+
+    function setStartDateFieldMode(mode) {
+        startDateState.fieldMode = mode === 'end' ? 'end' : 'start';
+        startDateState.reasonText = getStartDateFieldConfig().defaultReasonText;
     }
 
     function startDateWaitForElement(selector, timeout) {
@@ -15908,6 +15944,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     function showStartDateInputPanel() {
         addLogMessage('showStartDateInputPanel: creating input panel', 'log');
+        var fieldConfig = getStartDateFieldConfig();
         var modal = document.createElement('div');
         modal.id = 'startdate-input-modal';
         modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 20000; display: flex; align-items: center; justify-content: center;';
@@ -15920,7 +15957,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;';
         var titleEl = document.createElement('h3');
         titleEl.id = 'startdate-input-title';
-        titleEl.textContent = STARTDATE_LABELS.inputTitle;
+        titleEl.textContent = fieldConfig.inputTitle;
         titleEl.style.cssText = 'margin: 0; color: #111827; font-size: 18px; font-weight: 600; letter-spacing: 0.2px;';
         var closeButton = document.createElement('button');
         closeButton.innerHTML = '\u2715';
@@ -15947,7 +15984,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         description.appendChild(document.createElement('br'));
         var lines = [
             'Enter staff names below, separated by commas or new lines.',
-            'Enter the start date in one of these formats: MM-DD-YYYY, M/D/YYYY, or DDMonthYYYY (e.g. 15Jan2025).',
+            'Enter the ' + fieldConfig.fieldLabel.toLowerCase() + ' in one of these formats: MM-DD-YYYY, M/D/YYYY, or DDMonthYYYY (e.g. 15Jan2025).',
             'After clicking Continue, do not click anywhere else on the page.'
         ];
         for (var i = 0; i < lines.length; i++) {
@@ -15973,13 +16010,13 @@ function showResponsibilitiesProgressPanel(rolesData) {
         };
         var dateLabel = document.createElement('label');
         dateLabel.setAttribute('for', 'startdate-date-input');
-        dateLabel.textContent = 'Start Date';
+        dateLabel.textContent = fieldConfig.fieldLabel;
         dateLabel.style.cssText = 'display: block; color: #374151; font-size: 13px; font-weight: 600; margin-bottom: 6px; margin-top: 12px;';
         var dateInput = document.createElement('input');
         dateInput.type = 'text';
         dateInput.id = 'startdate-date-input';
         dateInput.placeholder = 'MM-DD-YYYY or 15Jan2025';
-        dateInput.setAttribute('aria-label', 'Start date input');
+        dateInput.setAttribute('aria-label', fieldConfig.fieldLabel + ' input');
         dateInput.style.cssText = 'width: 100%; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 10px; background: #ffffff; color: #111827; font-size: 14px; font-family: Segoe UI, Tahoma, Geneva, Verdana, sans-serif; outline: none; transition: all 0.15s ease; box-sizing: border-box;';
         dateInput.onfocus = function() {
             dateInput.style.borderColor = '#2563eb';
@@ -15994,9 +16031,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var reasonInput = document.createElement('input');
         reasonInput.type = 'text';
         reasonInput.id = 'startdate-reason-input';
-        reasonInput.value = STARTDATE_LABELS.defaultReasonText;
-        reasonInput.placeholder = STARTDATE_LABELS.defaultReasonText;
-        reasonInput.setAttribute('aria-label', 'Reason for start date update');
+        reasonInput.value = fieldConfig.defaultReasonText;
+        reasonInput.placeholder = fieldConfig.defaultReasonText;
+        reasonInput.setAttribute('aria-label', 'Reason for ' + fieldConfig.fieldLabel.toLowerCase() + ' update');
         reasonInput.style.cssText = 'width: 100%; padding: 10px 14px; border: 1px solid #d1d5db; border-radius: 10px; background: #ffffff; color: #111827; font-size: 14px; font-family: Segoe UI, Tahoma, Geneva, Verdana, sans-serif; outline: none; transition: all 0.15s ease; box-sizing: border-box;';
         reasonInput.onfocus = function() {
             reasonInput.style.borderColor = '#2563eb';
@@ -16007,7 +16044,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var continueButton = document.createElement('button');
         continueButton.textContent = 'Continue';
         continueButton.disabled = true;
-        continueButton.setAttribute('aria-label', 'Continue with start date assignment');
+        continueButton.setAttribute('aria-label', 'Continue with ' + fieldConfig.fieldLabel.toLowerCase() + ' assignment');
         continueButton.style.cssText = 'background: #22c55e; border: 1px solid #22c55e; color: #ffffff; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; letter-spacing: 0.2px; transition: all 0.15s ease; opacity: 0.5;';
         var dateStatusDiv = document.createElement('div');
         dateStatusDiv.id = 'startdate-date-status';
@@ -16062,7 +16099,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             startDateState.parsedNames = parsedNames;
             startDateState.parsedDate = parsedDate;
-            startDateState.reasonText = reasonInput.value.trim() || STARTDATE_LABELS.defaultReasonText;
+            startDateState.reasonText = reasonInput.value.trim() || getStartDateFieldConfig().defaultReasonText;
             addLogMessage('showStartDateInputPanel: parsedNames=' + parsedNames.length + ' date=' + parsedDate.displayMonthName + ' ' + parsedDate.day + ', ' + parsedDate.year, 'log');
             if (modal.parentNode) {
                 document.body.removeChild(modal);
@@ -16070,7 +16107,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             startDateState.isRunning = true;
             startDateState.timer = createFeatureTimer('startdate');
             startDateState.timer.start();
-            showCollectingDataPanel('startdate', STARTDATE_LABELS.featureButton);
+            showCollectingDataPanel('startdate', getStartDateFieldConfig().featureButton);
             startStartDateScan();
         };
         var clearButton = document.createElement('button');
@@ -16087,7 +16124,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             addLogMessage('showStartDateInputPanel: Clear All clicked', 'log');
             textarea.value = '';
             dateInput.value = '';
-            reasonInput.value = STARTDATE_LABELS.defaultReasonText;
+            reasonInput.value = getStartDateFieldConfig().defaultReasonText;
             dateStatusDiv.textContent = '';
             continueButton.disabled = true;
             continueButton.style.opacity = '0.5';
@@ -16489,6 +16526,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     function showStartDateProgressPanel() {
         addLogMessage('showStartDateProgressPanel: creating progress panel', 'log');
+        var fieldConfig = getStartDateFieldConfig();
         startDateState.isRunning = true;
         var modal = document.createElement('div');
         modal.id = 'startdate-progress-modal';
@@ -16505,7 +16543,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         titleContainer.style.cssText = 'display: flex; align-items: center; gap: 12px;';
         var titleEl = document.createElement('h3');
         titleEl.id = 'startdate-progress-title';
-        titleEl.textContent = STARTDATE_LABELS.featureButton + ' - Processing';
+        titleEl.textContent = fieldConfig.featureButton + ' - Processing';
         titleEl.style.cssText = 'margin: 0; color: #111827; font-size: 18px; font-weight: 600;';
         var statusBadge = document.createElement('span');
         statusBadge.id = 'startdate-status-badge';
@@ -16533,12 +16571,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
         dateInfoBar.style.cssText = 'margin-bottom: 12px; padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; flex-shrink: 0;';
         var dateInfoText = document.createElement('span');
         dateInfoText.style.cssText = 'color: #1e40af; font-size: 13px;';
-        dateInfoText.textContent = 'Setting Start Date: ' + startDateState.parsedDate.displayMonthName + ' ' + startDateState.parsedDate.day + ', ' + startDateState.parsedDate.year;
+        dateInfoText.textContent = 'Setting ' + fieldConfig.fieldLabel + ': ' + startDateState.parsedDate.displayMonthName + ' ' + startDateState.parsedDate.day + ', ' + startDateState.parsedDate.year;
         dateInfoBar.appendChild(dateInfoText);
         var panelsContainer = document.createElement('div');
         panelsContainer.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; overflow: hidden;';
         var leftPanel = createSubpanel('Scanned Log Entries', 'startdate-left-panel', 'startdate-left-search');
-        var rightPanel = createSubpanel('Start Date Status', 'startdate-right-panel', 'startdate-right-search');
+        var rightPanel = createSubpanel(fieldConfig.fieldLabel + ' Status', 'startdate-right-panel', 'startdate-right-search');
         addSortToggleToSubpanel(rightPanel, 'startdate-right-panel', 'startdate-sort-toggle', 'startdate-failure-filter', [STARTDATE_LABELS.statusNotFound, STARTDATE_LABELS.statusFailed, STARTDATE_LABELS.statusSaveFailed, STARTDATE_LABELS.statusEditFailed, STARTDATE_LABELS.statusMenuFailed, STARTDATE_LABELS.statusDatepickerFailed]);
         panelsContainer.appendChild(leftPanel);
         panelsContainer.appendChild(rightPanel);
@@ -16882,8 +16920,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function findStartLabeledDatePopup() {
+        var fieldConfig = getStartDateFieldConfig();
         var allPopups = document.querySelectorAll('date-time-popup');
-        addLogMessage('findStartLabeledDatePopup: found ' + allPopups.length + ' date-time-popup elements', 'log');
+        addLogMessage('findStartLabeledDatePopup: looking for ' + fieldConfig.fieldLabel + ', found ' + allPopups.length + ' date-time-popup elements', 'log');
         for (var pi = 0; pi < allPopups.length; pi++) {
             var popup = allPopups[pi];
             var parent = popup.parentElement;
@@ -16894,8 +16933,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (siblingInput) {
                 var placeholder = siblingInput.getAttribute('placeholder').toLowerCase();
                 addLogMessage('findStartLabeledDatePopup: popup ' + pi + ' sibling input placeholder="' + placeholder + '"', 'log');
-                if (placeholder.indexOf('start') !== -1) {
-                    addLogMessage('findStartLabeledDatePopup: matched "Start" placeholder at popup ' + pi, 'log');
+                if (placeholder.indexOf(fieldConfig.placeholderToken) !== -1) {
+                    addLogMessage('findStartLabeledDatePopup: matched "' + fieldConfig.fieldShort + '" placeholder at popup ' + pi, 'log');
                     return popup;
                 }
             }
@@ -16903,8 +16942,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (labelEl) {
                 var labelText = labelEl.textContent.trim().toLowerCase();
                 addLogMessage('findStartLabeledDatePopup: popup ' + pi + ' label text="' + labelText + '"', 'log');
-                if (labelText.indexOf('start') !== -1) {
-                    addLogMessage('findStartLabeledDatePopup: matched "Start" label at popup ' + pi, 'log');
+                if (labelText.indexOf(fieldConfig.placeholderToken) !== -1) {
+                    addLogMessage('findStartLabeledDatePopup: matched "' + fieldConfig.fieldShort + '" label at popup ' + pi, 'log');
                     return popup;
                 }
             }
@@ -16914,27 +16953,29 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (gpInput) {
                     var gpPlaceholder = gpInput.getAttribute('placeholder').toLowerCase();
                     addLogMessage('findStartLabeledDatePopup: popup ' + pi + ' grandparent input placeholder="' + gpPlaceholder + '"', 'log');
-                    if (gpPlaceholder.indexOf('start') !== -1) {
-                        addLogMessage('findStartLabeledDatePopup: matched "Start" via grandparent at popup ' + pi, 'log');
+                    if (gpPlaceholder.indexOf(fieldConfig.placeholderToken) !== -1) {
+                        addLogMessage('findStartLabeledDatePopup: matched "' + fieldConfig.fieldShort + '" via grandparent at popup ' + pi, 'log');
                         return popup;
                     }
                 }
             }
         }
-        addLogMessage('findStartLabeledDatePopup: no popup with "Start" label found', 'warn');
+        addLogMessage('findStartLabeledDatePopup: no popup with "' + fieldConfig.fieldShort + '" label found', 'warn');
         return null;
     }
 
     function openStartDatePicker() {
-        addLogMessage('openStartDatePicker: looking for start date input', 'log');
+        var fieldConfig = getStartDateFieldConfig();
+        addLogMessage('openStartDatePicker: looking for ' + fieldConfig.fieldLabel + ' input', 'log');
         return new Promise(function(resolve, reject) {
             try {
                 var startPopup = findStartLabeledDatePopup();
                 if (!startPopup) {
-                    addLogMessage('openStartDatePicker: no Start-labeled date-time-popup found', 'error');
-                    reject(new Error('Start date popup not found'));
+                    addLogMessage('openStartDatePicker: no ' + fieldConfig.fieldLabel + '-labeled date-time-popup found', 'error');
+                    reject(new Error(fieldConfig.fieldLabel + ' popup not found'));
                     return;
                 }
+                startDateState.activeDatePopup = startPopup;
                 var parent = startPopup.parentElement;
                 var triggerInput = parent ? parent.querySelector('input[placeholder]') : null;
                 if (!triggerInput) {
@@ -17052,7 +17093,13 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function getFreshPicker() {
-        var picker = document.querySelector('datepicker');
+        var picker = null;
+        if (startDateState.activeDatePopup && startDateState.activeDatePopup.isConnected) {
+            picker = startDateState.activeDatePopup.querySelector('datepicker, datepicker-inner, .test-date-picker, bs-datepicker-inline-container, .bs-datepicker');
+        }
+        if (!picker) {
+            picker = document.querySelector('datepicker');
+        }
         if (!picker) {
             picker = document.querySelector('datepicker-inner');
         }
@@ -17408,15 +17455,34 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
-    function readStartDateFromEditOrGrid(rowEl) {
-        addLogMessage('readStartDateFromEditOrGrid: reading date', 'log');
+    function getStartDateFieldGridColumnIndex() {
+        var fieldLabel = getStartDateFieldConfig().fieldLabel.toLowerCase();
         try {
-            var editInputs = document.querySelectorAll(STARTDATE_SELECTORS.startDateReadonlyInGrid);
+            var gridTable = document.querySelector(STARTDATE_SELECTORS.mainGridTable);
+            if (!gridTable) return -1;
+            var headers = gridTable.querySelectorAll('[role="columnheader"]');
+            for (var hi = 0; hi < headers.length; hi++) {
+                var headerText = (headers[hi].textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                if (headerText === fieldLabel || headerText.indexOf(fieldLabel) !== -1) {
+                    return hi;
+                }
+            }
+        } catch (err) {
+            addLogMessage('getStartDateFieldGridColumnIndex: error: ' + err.message, 'warn');
+        }
+        return -1;
+    }
+
+    function readStartDateFromEditOrGrid(rowEl) {
+        var fieldConfig = getStartDateFieldConfig();
+        addLogMessage('readStartDateFromEditOrGrid: reading ' + fieldConfig.fieldLabel, 'log');
+        try {
+            var editInputs = document.querySelectorAll(fieldConfig.readonlySelector);
             for (var ei = 0; ei < editInputs.length; ei++) {
                 var val = editInputs[ei].value || '';
                 val = val.trim();
                 if (val) {
-                    addLogMessage('readStartDateFromEditOrGrid: edit input value="' + val + '"', 'log');
+                    addLogMessage('readStartDateFromEditOrGrid: ' + fieldConfig.fieldLabel + ' input value="' + val + '"', 'log');
                     var parsed = parseDateString(val);
                     if (parsed) {
                         return parsed;
@@ -17425,7 +17491,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             if (rowEl) {
                 var cells = rowEl.querySelectorAll(STARTDATE_SELECTORS.mainGridCell);
-                for (var ci = 0; ci < cells.length; ci++) {
+                var targetColumnIndex = getStartDateFieldGridColumnIndex();
+                var startCi = targetColumnIndex >= 0 ? targetColumnIndex : 0;
+                var endCi = targetColumnIndex >= 0 ? targetColumnIndex + 1 : cells.length;
+                for (var ci = startCi; ci < endCi && ci < cells.length; ci++) {
                     var cellEls = cells[ci].querySelectorAll(STARTDATE_SELECTORS.gridDateCellText);
                     for (var di = 0; di < cellEls.length; di++) {
                         var cellText = cellEls[di].textContent.trim();
@@ -17449,7 +17518,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function readStartDateFromActiveEditField() {
-        addLogMessage('readStartDateFromActiveEditField: reading active Start Date field', 'log');
+        addLogMessage('readStartDateFromActiveEditField: reading active ' + getStartDateFieldConfig().fieldLabel + ' field', 'log');
         var rawValue = getStartDateActiveEditFieldValue();
         if (!rawValue) {
             return null;
@@ -17458,7 +17527,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function getStartDateActiveEditFieldValue() {
-        addLogMessage('getStartDateActiveEditFieldValue: reading active Start Date field value', 'log');
+        var fieldConfig = getStartDateFieldConfig();
+        addLogMessage('getStartDateActiveEditFieldValue: reading active ' + fieldConfig.fieldLabel + ' field value', 'log');
         try {
             var startPopup = findStartLabeledDatePopup();
             if (startPopup && startPopup.parentElement) {
@@ -17477,7 +17547,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (root === document.body) {
                     continue;
                 }
-                var inputs = root.querySelectorAll(STARTDATE_SELECTORS.startDateReadonlyInGrid);
+                var inputs = root.querySelectorAll(fieldConfig.readonlySelector);
                 for (var ii = 0; ii < inputs.length; ii++) {
                     var val = (inputs[ii].value || '').trim();
                     addLogMessage('getStartDateActiveEditFieldValue: fallback input value="' + val + '"', 'log');
@@ -17486,7 +17556,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     }
                 }
             }
-            addLogMessage('getStartDateActiveEditFieldValue: no active Start Date value found', 'warn');
+            addLogMessage('getStartDateActiveEditFieldValue: no active ' + fieldConfig.fieldLabel + ' value found', 'warn');
             return '';
         } catch (err) {
             addLogMessage('getStartDateActiveEditFieldValue: error: ' + err.message, 'error');
@@ -17506,23 +17576,24 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function verifyStartDateInputBeforeSave(targetDateObj) {
+        var fieldConfig = getStartDateFieldConfig();
         var selectedRawValue = getStartDateActiveEditFieldValue();
         var selectedDate = parseDateString(selectedRawValue);
         if (!selectedDate) {
-            addLogMessage('verifyStartDateInputBeforeSave: date field could not be parsed after picker selection raw="' + (selectedRawValue || '') + '"', 'error');
+            addLogMessage('verifyStartDateInputBeforeSave: ' + fieldConfig.fieldLabel + ' field could not be parsed after picker selection raw="' + (selectedRawValue || '') + '"', 'error');
             return false;
         }
         if (!isDateEqualToTarget(selectedDate, targetDateObj)) {
-            addLogMessage('verifyStartDateInputBeforeSave: selected date mismatch; refusing to save raw=' + selectedDate.raw, 'error');
+            addLogMessage('verifyStartDateInputBeforeSave: selected ' + fieldConfig.fieldLabel + ' mismatch; refusing to save raw=' + selectedDate.raw, 'error');
             return false;
         }
-        addLogMessage('verifyStartDateInputBeforeSave: selected date matches target', 'log');
+        addLogMessage('verifyStartDateInputBeforeSave: selected ' + fieldConfig.fieldLabel + ' matches target', 'log');
         return true;
     }
 
     function getStartDateReasonText() {
         var reason = (startDateState.reasonText || '').trim();
-        return reason || STARTDATE_LABELS.defaultReasonText;
+        return reason || getStartDateFieldConfig().defaultReasonText;
     }
 
     function findSaveButton() {
@@ -18273,7 +18344,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
         }
         if (titleEl) {
-            titleEl.textContent = STARTDATE_LABELS.featureButton + ' - ' + statusText;
+            titleEl.textContent = getStartDateFieldConfig().featureButton + ' - ' + statusText;
         }
         startDateState.isRunning = false;
     }
@@ -19646,6 +19717,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         addLogMessage('addStartDateInit: starting feature', 'log');
         startDateState.focusReturnElement = document.getElementById('startdate-btn');
         resetStartDateState();
+        setStartDateFieldMode('start');
         var mainTable = document.querySelector(STARTDATE_SELECTORS.mainTableContainer);
         addLogMessage('addStartDateInit: checking for main table', 'log');
         if (!mainTable) {
@@ -19657,8 +19729,24 @@ function showResponsibilitiesProgressPanel(rolesData) {
         showStartDateInputPanel();
     }
 
+    function addEndDateInit() {
+        addLogMessage('addEndDateInit: starting feature', 'log');
+        startDateState.focusReturnElement = document.getElementById('enddate-btn');
+        resetStartDateState();
+        setStartDateFieldMode('end');
+        var mainTable = document.querySelector(STARTDATE_SELECTORS.mainTableContainer);
+        addLogMessage('addEndDateInit: checking for main table', 'log');
+        if (!mainTable) {
+            addLogMessage('addEndDateInit: main table not found, showing warning', 'warn');
+            showStartDateWarning();
+            return;
+        }
+        addLogMessage('addEndDateInit: main table found, showing input panel', 'log');
+        showStartDateInputPanel();
+    }
+
     function stopStartDate() {
-        addLogMessage('stopStartDate: stopping all Start Date processes', 'log');
+        addLogMessage('stopStartDate: stopping all ' + getStartDateFieldConfig().fieldLabel + ' processes', 'log');
         startDateState.isRunning = false;
         startDateState.stopRequested = true;
         for (var i = 0; i < startDateState.idleCallbackIds.length; i++) {
@@ -19891,6 +19979,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         { id: 'resp-set-btn', label: 'Set Role (Template)', handler: function() { setResponsibilitiesInit(); } },
         { id: 'cb-select-btn', label: 'Select Checkboxes', handler: function() { selectCheckboxesInit(); } },
         { id: 'startdate-btn', label: 'Add Start Date (DoA)', handler: function() { addStartDateInit(); } },
+        { id: 'enddate-btn', label: 'Add End Date (DoA)', handler: function() { addEndDateInit(); } },
         { id: 'ssig-select-btn', label: 'Select PI Signature (DoA)', handler: function() { selectSignedCheckboxInit(); } },
         { id: 'sstart-select-btn', label: 'Select Staff Signature (DoA)', handler: function() { selectStartCheckboxInit(); } },
         { id: 'tlog-btn', label: 'Get Log Data', handler: function() { getTrainingLogInit(); } },
@@ -22722,6 +22811,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     { label: 'Add Staff Entries (DoA)', desc: 'Adds staff entries to the Delegation of Authority log in bulk, saving you from entering each person manually.' },
                     { label: 'Set Role (Template)', desc: 'Sets the role & responsibilities in the delegation log template. Useful for assigning tasks to all roles all at once.' },
                     { label: 'Add Start Date (DoA)', desc: 'Automatically fills in the start date field for DoA log entries so you don\'t have to enter it manually for each row.' },
+                    { label: 'Add End Date (DoA)', desc: 'Automatically fills in the end date field for DoA log entries using the same staff matching and date picker workflow as Add Start Date.' },
                     { label: 'Select PI Signature (DoA)', desc: 'Selects the checkbox for rows that have staff signatures. This is used to request PI Signatures for Start Date.' },
                     { label: 'Select Staff Signature (DoA)', desc: 'Selects rows that have a Start Date and an Unrequested Staff Signature, while skipping strikethrough rows.' },
                     { label: 'Update Role Resp. (DoA)', desc: 'Updates existing role responsibilities in the DoA log, replacing old values with new ones across multiple entries at once.' },
@@ -23635,10 +23725,17 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (shouldReplaceTrainingLog(log, trainingLogState.persisted)) {
                     var study = findStudyForTrainingLogContext(log.text);
                     var todayName = replaceLogDateWithToday(log.text, log.dateText, log.selectedDateIndex);
+                    var previousLegend = trainingLogState.persisted && trainingLogState.persisted.legends ? trainingLogState.persisted.legends : '';
+                    if (previousLegend) {
+                        addLogMessage('Training Log: preserving existing legend until a non-empty legend is extracted from the new latest log', 'log');
+                    }
+                    trainingLogState.legendResolvedUrl = '';
+                    trainingLogState.legendFailedUrl = '';
+                    trainingLogState.legendFailedAt = 0;
                     trainingLogState.persisted = {
                         latestTrainingLog: log.text,
                         todaysLogName: todayName,
-                        legends: '',
+                        legends: previousLegend,
                         matchedStudy: formatMatchedStudy(study),
                         matchedStudyData: getTrainingLogStudyPersistedData(study),
                         detectedAt: new Date().toISOString()
@@ -24324,6 +24421,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         fileInput.onchange = function() {
             if (fileInput.files && fileInput.files[0]) {
                 handleStudyImport(fileInput.files[0], overlay, renderStudyList);
+                fileInput.value = '';
             }
         };
         importBtn.onclick = function() { fileInput.click(); };
@@ -24335,14 +24433,27 @@ function showResponsibilitiesProgressPanel(rolesData) {
         exportBtn.onmouseout = function() { exportBtn.style.background = '#2563eb'; exportBtn.style.borderColor = '#2563eb'; };
         exportBtn.onclick = function() { handleStudyExport(); };
 
+        var deleteAllBtn = document.createElement('button');
+        deleteAllBtn.textContent = 'Delete All';
+        deleteAllBtn.style.cssText = 'background: #fff1f2; border: 1px solid #fecdd3; color: #be123c; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.15s ease;';
+        deleteAllBtn.onmouseover = function() { deleteAllBtn.style.background = '#ffe4e6'; };
+        deleteAllBtn.onmouseout = function() { deleteAllBtn.style.background = '#fff1f2'; };
+        deleteAllBtn.onclick = function() { confirmDeleteAllStudies(); };
+
         toolbar.appendChild(searchInput);
         toolbar.appendChild(sortSelect);
         toolbar.appendChild(createBtn);
         toolbar.appendChild(importBtn);
         toolbar.appendChild(fileInput);
         toolbar.appendChild(exportBtn);
+        toolbar.appendChild(deleteAllBtn);
 
         body.appendChild(toolbar);
+
+        var formContainer = document.createElement('div');
+        formContainer.id = 'florence-study-form-container';
+        formContainer.style.cssText = 'display: none; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; box-shadow: 0 1px 2px rgba(15,23,42,0.04);';
+        body.appendChild(formContainer);
 
         var countRow = document.createElement('div');
         countRow.id = 'florence-study-library-count';
@@ -24353,11 +24464,6 @@ function showResponsibilitiesProgressPanel(rolesData) {
         listContainer.id = 'florence-study-library-list';
         listContainer.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
         body.appendChild(listContainer);
-
-        var formContainer = document.createElement('div');
-        formContainer.id = 'florence-study-form-container';
-        formContainer.style.cssText = 'display: none; flex-direction: column; gap: 10px; padding: 14px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb;';
-        body.appendChild(formContainer);
 
         container.appendChild(header);
         container.appendChild(body);
@@ -24386,6 +24492,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
             listContainer.innerHTML = '';
             var list = getFilteredSortedStudies();
             countRow.textContent = 'Total Studies: ' + studyLibraryState.studies.length + (studyLibraryState.searchTerm ? ' (' + list.length + ' filtered)' : '');
+            deleteAllBtn.disabled = studyLibraryState.studies.length === 0;
+            deleteAllBtn.style.opacity = deleteAllBtn.disabled ? '0.55' : '1';
+            deleteAllBtn.style.cursor = deleteAllBtn.disabled ? 'not-allowed' : 'pointer';
             if (list.length === 0) {
                 var empty = document.createElement('div');
                 empty.textContent = 'No studies found.';
@@ -24467,8 +24576,69 @@ function showResponsibilitiesProgressPanel(rolesData) {
             delConfirmBtn.onmouseover = function() { delConfirmBtn.style.background = '#b91c1c'; delConfirmBtn.style.borderColor = '#b91c1c'; };
             delConfirmBtn.onmouseout = function() { delConfirmBtn.style.background = '#dc2626'; delConfirmBtn.style.borderColor = '#dc2626'; };
             delConfirmBtn.onclick = function() {
-                deleteStudy(study.protocol);
-                if (confirmOverlay.parentNode) confirmOverlay.parentNode.removeChild(confirmOverlay);
+                delConfirmBtn.disabled = true;
+                delConfirmBtn.textContent = 'Deleting...';
+                deleteStudy(study.protocol).then(function(deleted) {
+                    if (confirmOverlay.parentNode) confirmOverlay.parentNode.removeChild(confirmOverlay);
+                    if (deleted) {
+                        renderStudyList();
+                        updateTrainingLogDisplay();
+                    }
+                }).catch(function(e) {
+                    delConfirmBtn.disabled = false;
+                    delConfirmBtn.textContent = 'Delete';
+                    showWarning('Delete failed: ' + (e && e.message ? e.message : e));
+                });
+            };
+            confirmActions.appendChild(cancelBtn);
+            confirmActions.appendChild(delConfirmBtn);
+            confirmBox.appendChild(confirmTitle);
+            confirmBox.appendChild(confirmMsg);
+            confirmBox.appendChild(confirmActions);
+            confirmOverlay.appendChild(confirmBox);
+            document.body.appendChild(confirmOverlay);
+        }
+
+        function confirmDeleteAllStudies() {
+            if (!studyLibraryState.studies.length) return;
+            var total = studyLibraryState.studies.length;
+            var confirmOverlay = document.createElement('div');
+            confirmOverlay.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.5); z-index: 31000; display: flex; align-items: center; justify-content: center;';
+            var confirmBox = document.createElement('div');
+            confirmBox.style.cssText = 'background: #ffffff; border-radius: 10px; padding: 20px; width: 390px; max-width: 90%; box-shadow: 0 15px 30px rgba(0,0,0,0.2); border: 1px solid #e5e7eb;';
+            var confirmTitle = document.createElement('h4');
+            confirmTitle.textContent = 'Delete All Studies?';
+            confirmTitle.style.cssText = 'margin: 0 0 10px 0; color: #111827; font-size: 16px; font-weight: 600;';
+            var confirmMsg = document.createElement('p');
+            confirmMsg.textContent = 'This will delete all ' + total + ' studies from the Study Library. This cannot be undone.';
+            confirmMsg.style.cssText = 'color: #6b7280; font-size: 13px; margin: 0 0 16px 0; line-height: 1.4;';
+            var confirmActions = document.createElement('div');
+            confirmActions.style.cssText = 'display: flex; justify-content: flex-end; gap: 10px;';
+            var cancelBtn = document.createElement('button');
+            cancelBtn.textContent = 'Cancel';
+            cancelBtn.style.cssText = 'background: #ffffff; border: 1px solid #d1d5db; color: #374151; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500;';
+            cancelBtn.onclick = function() { if (confirmOverlay.parentNode) confirmOverlay.parentNode.removeChild(confirmOverlay); };
+            var delConfirmBtn = document.createElement('button');
+            delConfirmBtn.textContent = 'Delete All';
+            delConfirmBtn.style.cssText = 'background: #dc2626; border: 1px solid #dc2626; color: #ffffff; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 600;';
+            delConfirmBtn.onmouseover = function() { delConfirmBtn.style.background = '#b91c1c'; delConfirmBtn.style.borderColor = '#b91c1c'; };
+            delConfirmBtn.onmouseout = function() { delConfirmBtn.style.background = '#dc2626'; delConfirmBtn.style.borderColor = '#dc2626'; };
+            delConfirmBtn.onclick = function() {
+                delConfirmBtn.disabled = true;
+                delConfirmBtn.textContent = 'Deleting...';
+                deleteAllStudies().then(function(deleted) {
+                    if (confirmOverlay.parentNode) confirmOverlay.parentNode.removeChild(confirmOverlay);
+                    if (deleted) {
+                        formContainer.style.display = 'none';
+                        formContainer.innerHTML = '';
+                        renderStudyList();
+                        updateTrainingLogDisplay();
+                    }
+                }).catch(function(e) {
+                    delConfirmBtn.disabled = false;
+                    delConfirmBtn.textContent = 'Delete All';
+                    showWarning('Delete all failed: ' + (e && e.message ? e.message : e));
+                });
             };
             confirmActions.appendChild(cancelBtn);
             confirmActions.appendChild(delConfirmBtn);
@@ -24597,6 +24767,12 @@ function showResponsibilitiesProgressPanel(rolesData) {
             formActions.appendChild(cancelFormBtn);
             formActions.appendChild(saveFormBtn);
             formContainer.appendChild(formActions);
+            body.scrollTop = 0;
+            formContainer.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+            setTimeout(function() {
+                var protocolInput = document.getElementById('florence-study-protocol');
+                if (protocolInput) protocolInput.focus();
+            }, 50);
         }
 
         renderStudyList();
@@ -24631,11 +24807,22 @@ function showResponsibilitiesProgressPanel(rolesData) {
             return String(s.protocol || '').trim().toLowerCase() !== String(protocol || '').trim().toLowerCase();
         });
         if (studyLibraryState.studies.length < before) {
-            saveStudyLibrary().then(function() {
+            return saveStudyLibrary().then(function() {
                 addLogMessage('Study Library: deleted study ' + protocol, 'log');
-                updateTrainingLogDisplay();
+                return true;
             });
         }
+        return Promise.resolve(false);
+    }
+
+    function deleteAllStudies() {
+        var before = studyLibraryState.studies.length;
+        if (!before) return Promise.resolve(false);
+        studyLibraryState.studies = [];
+        return saveStudyLibrary().then(function() {
+            addLogMessage('Study Library: deleted all studies (' + before + ')', 'log');
+            return true;
+        });
     }
 
     function handleStudyExport() {
@@ -24665,6 +24852,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     return;
                 }
                 var imported = 0;
+                var updated = 0;
                 var skipped = 0;
                 var failed = 0;
                 for (var i = 0; i < result.studies.length; i++) {
@@ -24674,26 +24862,38 @@ function showResponsibilitiesProgressPanel(rolesData) {
                         failed++;
                         continue;
                     }
-                    var exists = studyLibraryState.studies.some(function(s) {
+                    migrateStudy(incoming);
+                    incoming.protocol = protocol;
+                    var existingIndex = studyLibraryState.studies.findIndex(function(s) {
                         return String(s.protocol || '').trim().toLowerCase() === protocol.toLowerCase();
                     });
-                    if (exists) {
-                        skipped++;
+                    if (existingIndex !== -1) {
+                        var existingStudy = studyLibraryState.studies[existingIndex];
+                        var changed = ['siteName', 'siteNumber', 'trainer', 'sponsor', 'pi'].some(function(key) {
+                            return String(existingStudy[key] || '').trim() !== String(incoming[key] || '').trim();
+                        });
+                        if (!changed) {
+                            skipped++;
+                            continue;
+                        }
+                        incoming.createdAt = existingStudy.createdAt || Date.now();
+                        incoming.updatedAt = Date.now();
+                        studyLibraryState.studies[existingIndex] = incoming;
+                        updated++;
                         continue;
                     }
-                    migrateStudy(incoming);
                     incoming.createdAt = Date.now();
                     incoming.updatedAt = Date.now();
                     studyLibraryState.studies.push(incoming);
                     imported++;
                 }
                 saveStudyLibrary().then(function() {
-                    addLogMessage('Study Library: import complete - imported: ' + imported + ', skipped: ' + skipped + ', failed: ' + failed, 'log');
-                    showImportResultOverlay(overlay, { imported: imported, skipped: skipped, failed: failed });
+                    addLogMessage('Study Library: import complete - added: ' + imported + ', updated: ' + updated + ', skipped: ' + skipped + ', failed: ' + failed, 'log');
+                    showImportResultOverlay(overlay, { imported: imported, updated: updated, skipped: skipped, failed: failed });
                     if (renderCallback) renderCallback();
                     updateTrainingLogDisplay();
                 }).catch(function() {
-                    showImportResultOverlay(overlay, { imported: 0, skipped: 0, failed: failed + imported + skipped, error: 'Storage save failed.' });
+                    showImportResultOverlay(overlay, { imported: 0, updated: 0, skipped: 0, failed: failed + imported + updated + skipped, error: 'Storage save failed.' });
                 });
             });
         };
@@ -24717,7 +24917,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (summary.error) {
             body.textContent = summary.error;
         } else {
-            body.innerHTML = 'Imported: <strong>' + summary.imported + '</strong><br>Skipped: <strong>' + summary.skipped + '</strong><br>Failed: <strong>' + summary.failed + '</strong>';
+            body.innerHTML = 'Added: <strong>' + (summary.imported || 0) + '</strong><br>Updated: <strong>' + (summary.updated || 0) + '</strong><br>Skipped: <strong>' + (summary.skipped || 0) + '</strong><br>Failed: <strong>' + (summary.failed || 0) + '</strong>';
         }
         var ok = document.createElement('button');
         ok.textContent = 'OK';
@@ -24991,16 +25191,217 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     const FLORENCE_SIDEBAR_WIDTH = 360;
+    const FLORENCE_LAYOUT_ATTR = 'data-florence-layout-offset';
+    const FLORENCE_LAYOUT_STYLE_ID = 'florence-sidebar-layout-style';
+    let florenceSidebarOffsetObserver = null;
+    let florenceSidebarOffsetTimer = null;
+    let florenceSidebarOffsetActive = false;
 
-    function applySidebarOffset() {
-        if (document.documentElement) {
-            document.documentElement.style.paddingRight = FLORENCE_SIDEBAR_WIDTH + 'px';
+    function florenceIsOwnElement(el) {
+        if (!el || el.nodeType !== 1) return true;
+        if (el.id === FLORENCE_GUI_ID || el.id === FLORENCE_ROOT_ID || el.id === FLORENCE_LAYOUT_STYLE_ID) return true;
+        if (el.closest && (el.closest('#' + FLORENCE_GUI_ID) || el.closest('#' + FLORENCE_ROOT_ID))) return true;
+        if (el.closest && el.closest('[' + FLORENCE_DATA_ATTR + ']')) return true;
+        return false;
+    }
+
+    function florenceIsVisibleElement(el) {
+        if (!el || el.nodeType !== 1) return false;
+        var rect = el.getBoundingClientRect();
+        if (!rect || rect.width < 1 || rect.height < 1) return false;
+        var style = window.getComputedStyle(el);
+        if (!style || style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity || '1') === 0) return false;
+        return true;
+    }
+
+    function florenceStoreOriginalStyle(el) {
+        if (!el || el.hasAttribute(FLORENCE_LAYOUT_ATTR)) return;
+        var computed = window.getComputedStyle(el);
+        el.setAttribute(FLORENCE_LAYOUT_ATTR, JSON.stringify({
+            right: el.style.right || '',
+            width: el.style.width || '',
+            maxWidth: el.style.maxWidth || '',
+            transform: el.style.transform || '',
+            computedTransform: computed && computed.transform && computed.transform !== 'none' ? computed.transform : '',
+            marginRight: el.style.marginRight || '',
+            paddingRight: el.style.paddingRight || '',
+            boxSizing: el.style.boxSizing || ''
+        }));
+    }
+
+    function florenceRestoreOffsetElement(el) {
+        if (!el || !el.hasAttribute(FLORENCE_LAYOUT_ATTR)) return;
+        try {
+            var original = JSON.parse(el.getAttribute(FLORENCE_LAYOUT_ATTR) || '{}');
+            el.style.right = original.right || '';
+            el.style.width = original.width || '';
+            el.style.maxWidth = original.maxWidth || '';
+            el.style.transform = original.transform || '';
+            el.style.marginRight = original.marginRight || '';
+            el.style.paddingRight = original.paddingRight || '';
+            el.style.boxSizing = original.boxSizing || '';
+        } catch (e) {
+            el.style.right = '';
+            el.style.width = '';
+            el.style.maxWidth = '';
+            el.style.transform = '';
+            el.style.marginRight = '';
+            el.style.paddingRight = '';
+            el.style.boxSizing = '';
+        }
+        el.removeAttribute(FLORENCE_LAYOUT_ATTR);
+    }
+
+    function florenceEnsureSidebarLayoutStyle() {
+        if (document.getElementById(FLORENCE_LAYOUT_STYLE_ID)) return;
+        var style = document.createElement('style');
+        style.id = FLORENCE_LAYOUT_STYLE_ID;
+        style.textContent = [
+            'html[data-florence-sidebar-visible="true"] { padding-right: ' + FLORENCE_SIDEBAR_WIDTH + 'px !important; box-sizing: border-box !important; }',
+            'html[data-florence-sidebar-visible="true"] .cdk-overlay-container { right: ' + FLORENCE_SIDEBAR_WIDTH + 'px !important; width: calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px) !important; }'
+        ].join('\n');
+        document.head.appendChild(style);
+    }
+
+    function florenceShiftFixedChrome() {
+        var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        if (!viewportWidth) return;
+        var candidates = document.querySelectorAll('body *');
+        for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            if (florenceIsOwnElement(el) || !florenceIsVisibleElement(el)) continue;
+            // Modal shells and their backdrops have their own positioning model.
+            // Let the dialog pass handle the outer shell only; never resize a
+            // full-screen backdrop or a child inside an already-shifted modal.
+            if (el.matches && el.matches('.modal-backdrop, .cdk-overlay-backdrop, [aria-hidden="true"].modal-backdrop')) {
+                // Clean up offsets written by an older refresh before leaving
+                // the backdrop under the page's own full-viewport layout.
+                florenceRestoreOffsetElement(el);
+                continue;
+            }
+            if (el.closest && el.closest('.modal, modal-container, [role="dialog"], [aria-modal="true"], .cdk-overlay-pane')) continue;
+            var computed = window.getComputedStyle(el);
+            if (!computed) continue;
+            var rect = el.getBoundingClientRect();
+            var tagName = (el.tagName || '').toLowerCase();
+            var className = String(el.className || '');
+            var isLikelyTopChrome = rect.top <= 120 && rect.left <= 4 && rect.right >= viewportWidth - 8 && rect.height <= 180;
+            var isTopNavigation = el.matches && el.matches('nav[aria-label="Top Navigation Bar"], .test-navbar-container');
+            var isNamedNavigation = isTopNavigation || /header|navbar|navigation|topbar|toolbar|app-header|page-header|site-header|main-header|c-header|c-navbar/i.test(className) || tagName === 'header' || tagName === 'nav';
+            var isTopWideNavigation = isNamedNavigation && rect.top <= 160 && rect.width >= Math.min(viewportWidth - 20, viewportWidth * 0.45);
+            var overlapsSidebar = rect.right > viewportWidth - FLORENCE_SIDEBAR_WIDTH + 8 && rect.left < viewportWidth - FLORENCE_SIDEBAR_WIDTH;
+            var isEligiblePosition = computed.position === 'fixed' || computed.position === 'sticky' || isTopWideNavigation;
+            if (!isEligiblePosition || (!isLikelyTopChrome && !overlapsSidebar && !isTopWideNavigation)) continue;
+            florenceStoreOriginalStyle(el);
+            if (computed.position === 'fixed' || computed.position === 'sticky' || isTopNavigation) {
+                el.style.right = FLORENCE_SIDEBAR_WIDTH + 'px';
+                el.style.width = 'calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px)';
+                el.style.maxWidth = 'calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px)';
+                el.style.boxSizing = 'border-box';
+            } else {
+                el.style.maxWidth = 'calc(100vw - ' + FLORENCE_SIDEBAR_WIDTH + 'px)';
+                if (isTopWideNavigation || isLikelyTopChrome) {
+                    el.style.paddingRight = FLORENCE_SIDEBAR_WIDTH + 'px';
+                    el.style.boxSizing = 'border-box';
+                }
+            }
         }
     }
 
-    function removeSidebarOffset() {
+    function florenceShiftDialogContent() {
+        var modalSelectors = [
+            'modal-container[role="dialog"]',
+            '.modal.show[role="dialog"]',
+            '[role="dialog"]',
+            '[aria-modal="true"]'
+        ].join(',');
+        var nodes = document.querySelectorAll(modalSelectors);
+        var viewportWidth = window.innerWidth || document.documentElement.clientWidth || 0;
+        for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (florenceIsOwnElement(el) || !florenceIsVisibleElement(el)) continue;
+            var dialogAncestor = el.parentElement ? el.parentElement.closest(modalSelectors) : null;
+            if (dialogAncestor && !florenceIsOwnElement(dialogAncestor) && florenceIsVisibleElement(dialogAncestor)) {
+                continue;
+            }
+            var rect = el.getBoundingClientRect();
+            if (rect.width >= viewportWidth - 20 && rect.height >= (window.innerHeight || 0) - 20) {
+                continue;
+            }
+            var computed = window.getComputedStyle(el);
+            var isDialogLike = /dialog|modal|overlay/i.test(el.className || '') || el.getAttribute('role') === 'dialog' || el.getAttribute('aria-modal') === 'true';
+            if (!isDialogLike) continue;
+            florenceStoreOriginalStyle(el);
+            var original = {};
+            try {
+                original = JSON.parse(el.getAttribute(FLORENCE_LAYOUT_ATTR) || '{}');
+            } catch (e) {
+                original = {};
+            }
+            var originalTransform = original.transform || '';
+            var shift = ' translateX(-' + Math.round(FLORENCE_SIDEBAR_WIDTH / 2) + 'px)';
+            var baseTransform = originalTransform || original.computedTransform || '';
+            el.style.transform = baseTransform + shift;
+            // Keep the backdrop and modal viewport full-size. Only the modal
+            // shell is translated, so its centered dialog moves left without
+            // changing the backdrop's coverage or repeatedly shrinking it.
+            el.style.right = '';
+            el.style.width = '';
+            el.style.maxWidth = '';
+        }
+    }
+
+    function florenceApplyOffsetToDynamicElements() {
+        if (!florenceSidebarOffsetActive) return;
+        florenceShiftFixedChrome();
+        florenceShiftDialogContent();
+    }
+
+    function florenceScheduleSidebarOffsetRefresh() {
+        if (!florenceSidebarOffsetActive) return;
+        if (florenceSidebarOffsetTimer) clearTimeout(florenceSidebarOffsetTimer);
+        florenceSidebarOffsetTimer = setTimeout(function() {
+            florenceSidebarOffsetTimer = null;
+            florenceApplyOffsetToDynamicElements();
+        }, 80);
+    }
+
+    function applySidebarOffset() {
+        florenceSidebarOffsetActive = true;
+        florenceEnsureSidebarLayoutStyle();
         if (document.documentElement) {
+            document.documentElement.setAttribute('data-florence-sidebar-visible', 'true');
+        }
+        florenceApplyOffsetToDynamicElements();
+        if (!florenceSidebarOffsetObserver && document.body) {
+            florenceSidebarOffsetObserver = new MutationObserver(florenceScheduleSidebarOffsetRefresh);
+            florenceSidebarOffsetObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'aria-hidden'] });
+        }
+        window.addEventListener('resize', florenceScheduleSidebarOffsetRefresh);
+    }
+
+    function removeSidebarOffset() {
+        florenceSidebarOffsetActive = false;
+        if (florenceSidebarOffsetTimer) {
+            clearTimeout(florenceSidebarOffsetTimer);
+            florenceSidebarOffsetTimer = null;
+        }
+        if (florenceSidebarOffsetObserver) {
+            florenceSidebarOffsetObserver.disconnect();
+            florenceSidebarOffsetObserver = null;
+        }
+        window.removeEventListener('resize', florenceScheduleSidebarOffsetRefresh);
+        if (document.documentElement) {
+            document.documentElement.removeAttribute('data-florence-sidebar-visible');
             document.documentElement.style.paddingRight = '';
+        }
+        var shifted = document.querySelectorAll('[' + FLORENCE_LAYOUT_ATTR + ']');
+        for (var i = 0; i < shifted.length; i++) {
+            florenceRestoreOffsetElement(shifted[i]);
+        }
+        var style = document.getElementById(FLORENCE_LAYOUT_STYLE_ID);
+        if (style && style.parentNode) {
+            style.parentNode.removeChild(style);
         }
     }
 
