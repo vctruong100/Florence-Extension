@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.41
+// Version: 2.5.48
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -5641,7 +5641,7 @@
         { keyword: 'lab tech', role: 'Laboratory Technician' },
         { keyword: 'labtech', role: 'Laboratory Technician' },
         { keyword: 'data', role: 'Data Entry' },
-        { keyword: 'regulatory', role: 'Regulatory Coordinator' },
+        { keyword: 'regulatory', role: 'Regulatory' },
         { keyword: 'dietary', role: 'Dietary Aide' },
         { keyword: 'pi', role: 'Principal Investigator' }
     ];
@@ -9923,6 +9923,78 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return Promise.resolve();
     }
 
+    function doaReadVisibleStaffNames() {
+        var gridTable = document.querySelector(DOA_SELECTORS.mainGridTable);
+        if (!gridTable) { return []; }
+        var rows = gridTable.querySelectorAll(DOA_SELECTORS.mainGridRow);
+        var names = [];
+        for (var i = 0; i < rows.length; i++) {
+            if (rows[i].getAttribute('role') === 'columnheader') { continue; }
+            var cells = rows[i].querySelectorAll(DOA_SELECTORS.mainGridCell);
+            if (cells.length <= ELOG_SELECTORS.nameCellIndex) { continue; }
+            var cell = cells[ELOG_SELECTORS.nameCellIndex];
+            var nameEl = cell.querySelector(ELOG_SELECTORS.namePrimary);
+            var name = '';
+            if (nameEl) {
+                if (nameEl.querySelector('br')) {
+                    for (var ni = 0; ni < nameEl.childNodes.length; ni++) {
+                        var node = nameEl.childNodes[ni];
+                        if (node.nodeName === 'BR') { break; }
+                        if (node.nodeType === Node.TEXT_NODE) { name += node.textContent; }
+                    }
+                } else {
+                    name = nameEl.textContent;
+                }
+            }
+            if (!name) {
+                var fallback = cell.querySelector(ELOG_SELECTORS.nameFallback);
+                name = fallback ? fallback.textContent : '';
+            }
+            name = String(name || '').trim().replace(/\s+/g, ' ');
+            if (name) { names.push(name); }
+        }
+        return names;
+    }
+
+    function doaVerifyCandidateInCurrentPage(candidate) {
+        return new Promise(function(resolve) {
+            var gridTable = document.querySelector(DOA_SELECTORS.mainGridTable);
+            if (!gridTable) { resolve({ found: false, names: [] }); return; }
+            var container = findScrollableContainer(gridTable);
+            if (container) {
+                var maxScroll = Math.max(0, container.scrollHeight - container.clientHeight);
+                container.scrollTo({ top: Math.min(maxScroll, container.scrollTop + 500), behavior: 'auto' });
+            }
+            var startedAt = Date.now();
+            var timeoutMs = 3500;
+            function check() {
+                var names = doaReadVisibleStaffNames();
+                var seenPairs = buildExistingPairsFromScan(names);
+                seenPairs.forEach(function(pair) { doaState.existingPairs.add(pair); });
+                var matched = findFuzzyMatchInPairs(candidate.pairKey, seenPairs, 2);
+                if (!matched && candidate.candidatePairKeys) {
+                    for (var i = 0; i < candidate.candidatePairKeys.length && !matched; i++) {
+                        matched = findFuzzyMatchInPairs(candidate.candidatePairKeys[i], seenPairs, 2);
+                    }
+                }
+                if (matched) {
+                    addLogMessage('doaVerifyCandidateInCurrentPage: verified ' + candidate.display + ' as ' + matched, 'log');
+                    resolve({ found: true, names: names });
+                    return;
+                }
+                if (Date.now() - startedAt >= timeoutMs) {
+                    addLogMessage('doaVerifyCandidateInCurrentPage: not found after local table scan for ' + candidate.display, 'warn');
+                    resolve({ found: false, names: names });
+                    return;
+                }
+                var checkTid = setTimeout(check, 350);
+                doaState.timeouts.push(checkTid);
+            }
+            var initialTid = setTimeout(check, 350);
+            doaState.timeouts.push(initialTid);
+        });
+    }
+
     function clickDoASaveAndAddAnother() {
         addLogMessage('clickDoASaveAndAddAnother: looking for Save button', 'log');
         return new Promise(function(resolve) {
@@ -9948,15 +10020,15 @@ function showResponsibilitiesProgressPanel(rolesData) {
             var maxChecks = Math.ceil(DOA_TIMEOUTS.waitAfterSaveMs / 200);
             function checkFormClosed() {
                 var memberInput = document.querySelector(DOA_SELECTORS.memberInput);
-                if (!memberInput) {
-                    addLogMessage('clickDoASaveAndAddAnother: form closed, save confirmed', 'log');
+                if (!memberInput || !memberInput.value.trim()) {
+                    addLogMessage('clickDoASaveAndAddAnother: form closed or member selection cleared, save acknowledged', 'log');
                     resolve(true);
                     return;
                 }
                 checkCount++;
                 if (checkCount >= maxChecks) {
-                    addLogMessage('clickDoASaveAndAddAnother: timeout waiting for form close, proceeding anyway', 'warn');
-                    resolve(true);
+                    addLogMessage('clickDoASaveAndAddAnother: save was not acknowledged before timeout', 'warn');
+                    resolve(false);
                     return;
                 }
                 var checkTid = setTimeout(checkFormClosed, 200);
@@ -10292,23 +10364,51 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     if (doaState.isPaused) { addLogMessage('processNextDoAFromQueue: paused before save', 'log'); return Promise.reject('__paused__'); }
                     return clickDoASaveAndAddAnother().then(function(saved) {
                         if (!saved) {
-                            addLogMessage('processNextDoAFromQueue: save failed', 'warn');
+                            addLogMessage('processNextDoAFromQueue: save acknowledgement timed out; not retrying to avoid a duplicate', 'warn');
                             candidate.status = DOA_LABELS.statusSaveFailed;
                             doaState.counters.failures++;
                             doaState.counters.pending--;
                             updateDoARightPanelStatus(candidate.pairKey, DOA_LABELS.statusSaveFailed);
-                        } else {
-                            addLogMessage('processNextDoAFromQueue: entry saved successfully', 'log');
-                            candidate.status = DOA_LABELS.statusTasksApplied;
-                            doaState.counters.added++;
-                            doaState.counters.pending--;
-                            updateDoARightPanelStatus(candidate.pairKey, DOA_LABELS.statusTasksApplied);
+                            updateDoARightPanelSummary(doaState.counters);
+                            if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
+                            doaState.addQueueIndex++;
+                            var uncertainTid = setTimeout(processNextDoAFromQueue, 50);
+                            doaState.timeouts.push(uncertainTid);
+                            return;
                         }
-                        updateDoARightPanelSummary(doaState.counters);
-                        if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
-                        doaState.addQueueIndex++;
-                        var tid4b = setTimeout(processNextDoAFromQueue, 50);
-                        doaState.timeouts.push(tid4b);
+                        return doaVerifyCandidateInCurrentPage(candidate).then(function(verification) {
+                            if (verification.found) {
+                                addLogMessage('processNextDoAFromQueue: table verification passed for ' + candidate.display, 'log');
+                                candidate.status = DOA_LABELS.statusTasksApplied;
+                                doaState.counters.added++;
+                                doaState.counters.pending--;
+                                updateDoARightPanelStatus(candidate.pairKey, DOA_LABELS.statusTasksApplied);
+                                updateDoARightPanelSummary(doaState.counters);
+                                if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
+                                doaState.addQueueIndex++;
+                                var verifiedTid = setTimeout(processNextDoAFromQueue, 50);
+                                doaState.timeouts.push(verifiedTid);
+                                return;
+                            }
+                            if (!candidate._verificationRetryCount) {
+                                addLogMessage('processNextDoAFromQueue: row not visible; refreshing duplicate check and retrying once for ' + candidate.display, 'warn');
+                                candidate._verificationRetryCount = 1;
+                                candidate.status = DOA_LABELS.statusPending;
+                                var retryTid = setTimeout(processNextDoAFromQueue, 350);
+                                doaState.timeouts.push(retryTid);
+                                return;
+                            }
+                            addLogMessage('processNextDoAFromQueue: row still absent after one safe retry for ' + candidate.display, 'error');
+                            candidate.status = DOA_LABELS.statusSaveFailed;
+                            doaState.counters.failures++;
+                            doaState.counters.pending--;
+                            updateDoARightPanelStatus(candidate.pairKey, DOA_LABELS.statusSaveFailed);
+                            updateDoARightPanelSummary(doaState.counters);
+                            if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
+                            doaState.addQueueIndex++;
+                            var failedVerifyTid = setTimeout(processNextDoAFromQueue, 50);
+                            doaState.timeouts.push(failedVerifyTid);
+                        });
                     });
                 });
             });
@@ -15515,6 +15615,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         statusSaving: 'Saving',
         statusSaved: 'Saved',
         statusAlreadySet: 'Already Set',
+        statusStrikethrough: 'Skipped (Strikethrough)',
         statusSaveFailed: 'Save Failed',
         statusLocating: 'Locating',
         statusEditing: 'Editing',
@@ -15566,6 +15667,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         alreadySet: 0,
         notFound: 0,
         failures: 0,
+        strikethrough: 0,
         pending: 0
     };
 
@@ -15584,6 +15686,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         reasonText: STARTDATE_LABELS.defaultReasonText,
         scannedNames: [],
         seenNormalizedNames: new Set(),
+        strikethroughPairKeys: new Set(),
+        activePairKeys: new Set(),
         scrollContainer: null,
         prevScrollTop: 0,
         userScrollHandler: null,
@@ -15592,7 +15696,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         leftPanelRowIndex: 0,
         fieldMode: 'start',
         activeDatePopup: null,
-        counters: { total: 0, saved: 0, alreadySet: 0, notFound: 0, failures: 0, pending: 0 },
+        counters: { total: 0, saved: 0, alreadySet: 0, notFound: 0, failures: 0, strikethrough: 0, pending: 0 },
         timer: null
     };
 
@@ -15612,6 +15716,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
         startDateState.reasonText = getStartDateFieldConfig().defaultReasonText;
         startDateState.scannedNames = [];
         startDateState.seenNormalizedNames = new Set();
+        startDateState.strikethroughPairKeys = new Set();
+        startDateState.activePairKeys = new Set();
         startDateState.scrollContainer = null;
         startDateState.prevScrollTop = 0;
         startDateState.userScrollHandler = null;
@@ -15626,6 +15732,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             alreadySet: 0,
             notFound: 0,
             failures: 0,
+            strikethrough: 0,
             pending: 0
         };
     }
@@ -16215,6 +16322,14 @@ function showResponsibilitiesProgressPanel(rolesData) {
             if (!extractedName) {
                 continue;
             }
+            var pairKey = normalizeFirstLastPair(extractedName);
+            if (startDateState.fieldMode === 'end') {
+                if (startDateRowIsStrikethrough(row)) {
+                    if (pairKey) { startDateState.strikethroughPairKeys.add(pairKey); }
+                    continue;
+                }
+                if (pairKey) { startDateState.activePairKeys.add(pairKey); }
+            }
             var normalized = elogNormalizeName(extractedName);
             if (startDateState.seenNormalizedNames.has(normalized)) {
                 continue;
@@ -16596,6 +16711,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             alreadySet: 0,
             notFound: 0,
             failures: 0,
+            strikethrough: 0,
             pending: nonDuplicateCount
         };
         addLogMessage('showStartDateProgressPanel: nonDuplicateCount=' + nonDuplicateCount, 'log');
@@ -16608,6 +16724,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
             { id: 'startdate-summary-pending', label: 'Pending', value: String(nonDuplicateCount) },
             { id: 'startdate-summary-percent', label: 'Progress', value: '0%' }
         ];
+        if (fieldConfig.mode === 'end') {
+            summaryItems.splice(5, 0, { id: 'startdate-summary-strikethrough', label: 'Strikethrough', value: '0' });
+        }
         for (var si = 0; si < summaryItems.length; si++) {
             var sItem = document.createElement('div');
             sItem.style.cssText = 'text-align: center;';
@@ -16730,7 +16849,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     badgeColor = '#dc2626';
                     badgeBg = '#fee2e2';
                 } else if (newStatus === STARTDATE_LABELS.statusStopped ||
-                    newStatus === STARTDATE_LABELS.statusDuplicate) {
+                    newStatus === STARTDATE_LABELS.statusDuplicate ||
+                    newStatus === STARTDATE_LABELS.statusStrikethrough) {
                     badgeColor = '#6b7280';
                     badgeBg = '#f3f4f6';
                 } else if (newStatus === STARTDATE_LABELS.statusSettingDate ||
@@ -16765,6 +16885,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         var elAlreadySet = document.getElementById('startdate-summary-alreadyset');
         var elNotFound = document.getElementById('startdate-summary-notfound');
         var elFailed = document.getElementById('startdate-summary-failed');
+        var elStrikethrough = document.getElementById('startdate-summary-strikethrough');
         var elPending = document.getElementById('startdate-summary-pending');
         var elPercent = document.getElementById('startdate-summary-percent');
         if (elTotal) {
@@ -16782,6 +16903,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (elFailed) {
             elFailed.textContent = String(counters.failures);
         }
+        if (elStrikethrough) {
+            elStrikethrough.textContent = String(counters.strikethrough || 0);
+        }
         if (elPending) {
             elPending.textContent = String(counters.pending);
         }
@@ -16790,7 +16914,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             var pct = counters.total > 0 ? Math.round((processed / counters.total) * 100) : 0;
             elPercent.textContent = pct + '%';
         }
-        addLogMessage('updateStartDateRightPanelSummary: saved=' + counters.saved + ' alreadySet=' + counters.alreadySet + ' notFound=' + counters.notFound + ' failures=' + counters.failures + ' pending=' + counters.pending, 'log');
+        addLogMessage('updateStartDateRightPanelSummary: saved=' + counters.saved + ' alreadySet=' + counters.alreadySet + ' notFound=' + counters.notFound + ' failures=' + counters.failures + ' strikethrough=' + (counters.strikethrough || 0) + ' pending=' + counters.pending, 'log');
     }
 
     function findRowByNamePairKey(targetPairKey) {
@@ -16842,6 +16966,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
             var rowPairKey = normalizeFirstLastPair(extractedName);
             if (rowPairKey === targetPairKey) {
+                if (startDateState.fieldMode === 'end' && startDateRowIsStrikethrough(row)) {
+                    continue;
+                }
                 addLogMessage('findRowByNamePairKey: found match at row ' + i + ' name=' + extractedName, 'log');
                 return row;
             }
@@ -17956,6 +18083,23 @@ function showResponsibilitiesProgressPanel(rolesData) {
         }
     }
 
+    function startDateMarkStrikethroughSkipped(candidate, resolve, detail) {
+        addLogMessage('startDateMarkStrikethroughSkipped: skipping ' + candidate.display + ' because the DoA row is struck through', 'log');
+        candidate.status = STARTDATE_LABELS.statusStrikethrough;
+        updateStartDateRightPanelStatus(candidate.pairKey, STARTDATE_LABELS.statusStrikethrough, detail || 'Strikethrough row skipped');
+        startDateState.counters.strikethrough++;
+        startDateState.counters.pending--;
+        updateStartDateRightPanelSummary(startDateState.counters);
+        if (startDateState.timer) { startDateState.timer.updateProgress(startDateState.counters.total - startDateState.counters.pending); }
+        updateStartDateAriaLive(candidate.display + ' skipped because the row is strikethrough');
+        resolve();
+    }
+
+    function startDateRowIsStrikethrough(rowEl) {
+        if (!rowEl) { return false; }
+        return !!rowEl.querySelector('s, del, strike') || ssigIsRowStrikethrough(rowEl);
+    }
+
     function processRowEditAndSave(candidate, rowEl, resolve, _retryAfterCancel) {
         var isRetry = !!_retryAfterCancel;
         addLogMessage('processRowEditAndSave: processing ' + candidate.display + (isRetry ? ' (retry after cancel)' : ''), 'log');
@@ -17963,6 +18107,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
             candidate.status = STARTDATE_LABELS.statusStopped;
             updateStartDateRightPanelStatus(candidate.pairKey, STARTDATE_LABELS.statusStopped);
             resolve();
+            return;
+        }
+        if (startDateState.fieldMode === 'end' && startDateRowIsStrikethrough(rowEl)) {
+            startDateMarkStrikethroughSkipped(candidate, resolve, 'Row became strikethrough before edit');
             return;
         }
         candidate.status = STARTDATE_LABELS.statusEditing;
@@ -18015,6 +18163,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 }, 1000);
                 startDateState.timeouts.push(cancelWaitTid);
                 return;
+            }
+            if (startDateState.fieldMode === 'end' && startDateRowIsStrikethrough(rowEl)) {
+                throw new Error('__STRIKETHROUGH_ROW__');
             }
             var existingDate = readStartDateFromEditOrGrid(rowEl);
             if (existingDate && isDateEqualToTarget(existingDate, startDateState.parsedDate)) {
@@ -18069,6 +18220,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 });
             })
                 .then(function() {
+                    if (startDateState.fieldMode === 'end' && startDateRowIsStrikethrough(rowEl)) {
+                        throw new Error('__STRIKETHROUGH_ROW__');
+                    }
                     addLogMessage('processRowEditAndSave: date selected, saving for ' + candidate.display, 'log');
                     updateStartDateAriaLive('Saving for ' + candidate.display);
                     return clickSaveAndVerifyForCandidate(candidate, rowEl, startDateState.parsedDate);
@@ -18104,6 +18258,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (startDateState.stopRequested) {
                     candidate.status = STARTDATE_LABELS.statusStopped;
                     updateStartDateRightPanelStatus(candidate.pairKey, STARTDATE_LABELS.statusStopped);
+                } else if (err.message === '__STRIKETHROUGH_ROW__' && startDateState.fieldMode === 'end') {
+                    clickCancelButton();
+                    startDateMarkStrikethroughSkipped(candidate, resolve, 'Row became strikethrough before save');
+                    return;
                 } else {
                     var failStatus = STARTDATE_LABELS.statusFailed;
                     var failDetail = err.message;
@@ -18203,9 +18361,17 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 continue;
             }
             if (!scannedPairKeys.has(candidate.pairKey)) {
-                candidate.status = STARTDATE_LABELS.statusNotFound;
-                updateStartDateRightPanelStatus(candidate.pairKey, STARTDATE_LABELS.statusNotFound);
-                startDateState.counters.notFound++;
+                var struckMatch = startDateState.strikethroughPairKeys.has(candidate.pairKey) || findFuzzyMatchInPairs(candidate.pairKey, startDateState.strikethroughPairKeys, 2);
+                var activeMatch = startDateState.activePairKeys.has(candidate.pairKey) || findFuzzyMatchInPairs(candidate.pairKey, startDateState.activePairKeys, 2);
+                if (startDateState.fieldMode === 'end' && struckMatch && !activeMatch) {
+                    candidate.status = STARTDATE_LABELS.statusStrikethrough;
+                    updateStartDateRightPanelStatus(candidate.pairKey, STARTDATE_LABELS.statusStrikethrough);
+                    startDateState.counters.strikethrough++;
+                } else {
+                    candidate.status = STARTDATE_LABELS.statusNotFound;
+                    updateStartDateRightPanelStatus(candidate.pairKey, STARTDATE_LABELS.statusNotFound);
+                    startDateState.counters.notFound++;
+                }
                 startDateState.counters.pending--;
             } else {
                 queue.push(candidate);
@@ -18240,7 +18406,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 if (startDateState.timer) { startDateState.timer.complete(); }
                 updateStartDateProgressStatus(STARTDATE_LABELS.progressComplete, 'complete');
                 var c = startDateState.counters;
-                updateStartDateAriaLive('Complete. Saved: ' + c.saved + ', Already Set: ' + c.alreadySet + ', Not Found: ' + c.notFound + ', Failed: ' + c.failures);
+                updateStartDateAriaLive('Complete. Saved: ' + c.saved + ', Already Set: ' + c.alreadySet + ', Not Found: ' + c.notFound + ', Skipped strikethrough: ' + (c.strikethrough || 0) + ', Failed: ' + c.failures);
                 return;
             }
             var currentCandidate = queue[queueIndex];
@@ -20133,7 +20299,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function loadHideLogs() {
-        return localStorage.getItem(CFG_STORAGE.hideLogs) === 'true';
+        var stored = localStorage.getItem(CFG_STORAGE.hideLogs);
+        return stored === null ? true : stored === 'true';
     }
 
     function saveHideLogsSetting(hidden) {
