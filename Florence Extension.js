@@ -1,6 +1,6 @@
 
 // Florence Automator — Extension Content Script
-// Version: 2.5.48
+// Version: 2.5.77
 // Loads as a Manifest V3 content script on https://us.v2.researchbinders.com/*
 
 (function () {
@@ -179,6 +179,8 @@
         statusSelectionFailed: 'Selection Failed',
         statusSaveFailed: 'Save Failed',
         statusRoleNotFound: 'Role Not Found',
+        statusResponsibilitiesChanged: 'Responsibilities Changed',
+        statusPreserveCheckFailed: 'Preservation Check Failed',
         statusTasksApplied: 'Completed',
         statusStopped: 'Stopped'
     };
@@ -213,6 +215,7 @@
         isAddingEntries: false,
         isPaused: false,
         activeDropdown: null,
+        preserveResponsibilities: false,
         timer: null
     };
 
@@ -1007,11 +1010,11 @@
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
         document.body.appendChild(modal);
         initializeRightPanel();
         populateELogLeftPanel();
         finalizeELogRightPanelAfterScan();
+        mountDockedStatusPanel({ featureId: 'elog', modalId: 'elog-progress-modal', titleId: 'elog-progress-title', badgeId: 'elog-status-badge', listId: 'elog-right-panel', summaryId: 'elog-summary-footer', timerId: 'elog-timer-bar', liveId: 'elog-aria-live', label: 'Training Log staff-entry status' });
         rescanButton.focus();
         addLogMessage('showELogProgressPanel: progress panel displayed with all data populated', 'log');
         updateScanStatus('Scan Complete', 'complete');
@@ -1054,13 +1057,27 @@
         addLogMessage('filterSubpanelList: filtering ' + listId + ' with term: ' + searchTerm, 'log');
         const list = document.getElementById(listId);
         if (!list) { return; }
+        applySubpanelListFilters(list, searchTerm);
+    }
+
+    function applySubpanelListFilters(list, searchTermOverride) {
+        if (!list) { return; }
         const items = list.querySelectorAll('.' + ELOG_CSS_CLASSNAMES.listItem);
+        const panel = list.parentElement;
+        const searchInput = panel && panel.querySelector('input[aria-label^="Search "]');
+        const searchTerm = typeof searchTermOverride === 'string' ? searchTermOverride : (searchInput ? searchInput.value : '');
         const searchLower = searchTerm.toLowerCase().trim();
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
             const text = item.textContent.toLowerCase();
-            if (!searchLower || text.indexOf(searchLower) !== -1) { item.style.display = 'flex'; }
-            else { item.style.display = 'none'; }
+            const badge = item.querySelector('.elog-status-badge');
+            const status = badge ? badge.textContent.trim() : '';
+            const statusState = list._statusFilterState;
+            const matchesStatus = !statusState || !badge || statusState[status] !== false;
+            const matchesSearch = !searchLower || text.indexOf(searchLower) !== -1;
+            const failureStatuses = list._failureFilterStatuses || [];
+            const matchesFailure = !list._failureFilterActive || !badge || failureStatuses.indexOf(status) !== -1;
+            item.style.display = matchesStatus && matchesSearch && matchesFailure ? 'flex' : 'none';
         }
     }
 
@@ -1075,7 +1092,7 @@
             return;
         }
         var titleRow = document.createElement('div');
-        titleRow.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;';
+        titleRow.style.cssText = 'display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 8px;';
         titleEl.style.cssText = 'margin: 0; color: #111827; font-size: 14px; font-weight: 600;';
         panelHeader.removeChild(titleEl);
         titleRow.appendChild(titleEl);
@@ -1113,7 +1130,7 @@
         titleRow.appendChild(toggleBtn);
         if (failureFilterId && failureStatuses) {
             var btnContainer = document.createElement('div');
-            btnContainer.style.cssText = 'display: flex; gap: 4px; flex-shrink: 0;';
+            btnContainer.style.cssText = 'display: flex; flex-wrap: wrap; gap: 6px; flex: 0 1 auto;';
             titleRow.removeChild(toggleBtn);
             btnContainer.appendChild(toggleBtn);
             var filterBtn = document.createElement('button');
@@ -1137,6 +1154,8 @@
             statusFilterBtn.id = listId + '-status-filter-btn';
             statusFilterBtn.textContent = 'Filter \u25BC';
             statusFilterBtn.setAttribute('aria-label', 'Filter by status');
+            statusFilterBtn.setAttribute('aria-expanded', 'false');
+            statusFilterBtn.setAttribute('aria-controls', listId + '-status-filter-dropdown');
             statusFilterBtn.style.cssText = 'background: #f3f4f6; border: 1px solid #e5e7eb; color: #6b7280; padding: 2px 10px; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 600; transition: all 0.15s ease; flex-shrink: 0; position: relative;';
             statusFilterBtn.onmouseover = function() {
                 statusFilterBtn.style.background = '#e5e7eb';
@@ -1191,23 +1210,12 @@
             return;
         }
         var items = list.querySelectorAll('.' + ELOG_CSS_CLASSNAMES.listItem);
+        list._failureFilterActive = showOnlyFailures;
+        list._failureFilterStatuses = failureStatuses.slice();
         for (var i = 0; i < items.length; i++) {
-            var item = items[i];
-            if (!showOnlyFailures) {
-                item.style.display = 'flex';
-                continue;
-            }
-            var badge = item.querySelector('.elog-status-badge');
-            var badgeText = badge ? badge.textContent.trim() : '';
-            var isFailure = false;
-            for (var fi = 0; fi < failureStatuses.length; fi++) {
-                if (badgeText === failureStatuses[fi]) {
-                    isFailure = true;
-                    break;
-                }
-            }
-            item.style.display = isFailure ? 'flex' : 'none';
+            items[i].style.display = 'flex';
         }
+        applySubpanelListFilters(list);
     }
 
     function showFailureNamesPopup(listId, failureStatuses) {
@@ -1304,7 +1312,8 @@
     function showStatusFilterDropdown(listId, buttonEl) {
         var existingDropdown = document.getElementById(listId + '-status-filter-dropdown');
         if (existingDropdown) {
-            existingDropdown.remove();
+            if (typeof existingDropdown._closeStatusFilter === 'function') { existingDropdown._closeStatusFilter(); }
+            else { existingDropdown.remove(); }
             return;
         }
         var list = document.getElementById(listId);
@@ -1322,21 +1331,18 @@
         if (statuses.length === 0) { return; }
         var dropdown = document.createElement('div');
         dropdown.id = listId + '-status-filter-dropdown';
-        dropdown.style.cssText = 'position: absolute; top: 100%; right: 0; margin-top: 6px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 10px; padding: 0; z-index: 10000; min-width: 220px; max-height: 400px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,0.15);';
-        var filterState = {};
+        buttonEl.setAttribute('aria-expanded', 'true');
+        dropdown.style.cssText = 'position: fixed; display: flex; flex-direction: column; box-sizing: border-box; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; padding: 0; z-index: 2147483647; width: min(260px, calc(100vw - 16px)); max-height: min(420px, calc(100vh - 16px)); overflow: hidden; box-shadow: 0 12px 32px rgba(15,23,42,0.22);';
+        var filterState = list._statusFilterState || {};
         for (var si = 0; si < statuses.length; si++) {
-            filterState[statuses[si]] = true;
-        }
-        var applyFilter = function() {
-            for (var i = 0; i < items.length; i++) {
-                var badge = items[i].querySelector('.elog-status-badge');
-                if (!badge) {
-                    items[i].style.display = 'flex';
-                    continue;
-                }
-                var statusText = badge.textContent.trim();
-                items[i].style.display = filterState[statusText] ? 'flex' : 'none';
+            if (!Object.prototype.hasOwnProperty.call(filterState, statuses[si])) {
+                filterState[statuses[si]] = true;
             }
+        }
+        list._statusFilterState = filterState;
+        var applyFilter = function() {
+            list._statusFilterState = filterState;
+            applySubpanelListFilters(list);
         };
         var header = document.createElement('div');
         header.style.cssText = 'padding: 12px 14px; background: #f9fafb; border-bottom: 1px solid #e5e7eb;';
@@ -1381,7 +1387,7 @@
         header.appendChild(selectAllRow);
         dropdown.appendChild(header);
         var scrollContainer = document.createElement('div');
-        scrollContainer.style.cssText = 'max-height: 280px; overflow-y: auto; padding: 8px 0;';
+        scrollContainer.style.cssText = 'flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 6px 0;';
         for (var si = 0; si < statuses.length; si++) {
             var statusRow = document.createElement('div');
             statusRow.style.cssText = 'display: flex; align-items: center; gap: 10px; padding: 8px 14px; cursor: pointer; transition: background 0.15s ease; user-select: none;';
@@ -1455,17 +1461,56 @@
         };
         footer.appendChild(copyFilteredBtn);
         dropdown.appendChild(footer);
-        buttonEl.style.position = 'relative';
-        buttonEl.appendChild(dropdown);
+        var viewportWidth = Math.max(0, document.documentElement.clientWidth || window.innerWidth);
+        var viewportHeight = Math.max(0, document.documentElement.clientHeight || window.innerHeight);
+        var dropdownWidth = Math.min(260, Math.max(0, viewportWidth - 16));
+        var dropdownMaxHeight = Math.min(420, Math.max(120, viewportHeight - 16));
+        dropdown.style.width = dropdownWidth + 'px';
+        dropdown.style.visibility = 'hidden';
+        dropdown.style.left = '0px';
+        dropdown.style.top = '0px';
+        document.body.appendChild(dropdown);
+        var buttonRect = buttonEl.getBoundingClientRect();
+        var belowSpace = viewportHeight - buttonRect.bottom - 8;
+        var aboveSpace = buttonRect.top - 8;
+        var placeAbove = belowSpace < 220 && aboveSpace > belowSpace;
+        var availableSpace = Math.max(100, placeAbove ? aboveSpace : belowSpace);
+        var actualMaxHeight = Math.min(dropdownMaxHeight, availableSpace - 8);
+        dropdown.style.maxHeight = actualMaxHeight + 'px';
+        scrollContainer.style.maxHeight = Math.max(48, actualMaxHeight - 150) + 'px';
+        var dropdownHeight = Math.min(dropdown.offsetHeight || actualMaxHeight, actualMaxHeight);
+        var left = Math.min(buttonRect.right - dropdownWidth, viewportWidth - dropdownWidth - 8);
+        left = Math.max(8, left);
+        var top = placeAbove ? buttonRect.top - dropdownHeight - 6 : buttonRect.bottom + 6;
+        top = Math.max(8, Math.min(top, viewportHeight - dropdownHeight - 8));
+        dropdown.style.left = left + 'px';
+        dropdown.style.top = top + 'px';
+        dropdown.style.visibility = 'visible';
         var closeDropdown = function(e) {
-            if (!dropdown.contains(e.target) && e.target !== buttonEl) {
+            if (e && e.type === 'keydown' && e.key === 'Escape') {
+                e.preventDefault();
                 dropdown.remove();
-                document.removeEventListener('click', closeDropdown);
+                buttonEl.setAttribute('aria-expanded', 'false');
+                document.removeEventListener('click', closeDropdown, true);
+                document.removeEventListener('keydown', closeDropdown, true);
+                window.removeEventListener('resize', closeDropdown);
+                window.removeEventListener('scroll', closeDropdown, true);
+                if (buttonEl.isConnected) { buttonEl.focus(); }
+                return;
             }
+            if (e && (dropdown.contains(e.target) || e.target === buttonEl || buttonEl.contains(e.target))) { return; }
+            dropdown.remove();
+            buttonEl.setAttribute('aria-expanded', 'false');
+            document.removeEventListener('click', closeDropdown, true);
+            document.removeEventListener('keydown', closeDropdown, true);
+            window.removeEventListener('resize', closeDropdown);
+            window.removeEventListener('scroll', closeDropdown, true);
         };
-        setTimeout(function() {
-            document.addEventListener('click', closeDropdown);
-        }, 100);
+        dropdown._closeStatusFilter = function() { closeDropdown(null); };
+        document.addEventListener('click', closeDropdown, true);
+        document.addEventListener('keydown', closeDropdown, true);
+        window.addEventListener('resize', closeDropdown);
+        window.addEventListener('scroll', closeDropdown, true);
         addLogMessage('showStatusFilterDropdown: created dropdown for ' + listId + ' with ' + statuses.length + ' statuses', 'log');
     }
 
@@ -1489,20 +1534,20 @@
     function createListItem(text, statusText, statusType, index) {
         const item = document.createElement('div');
         item.className = ELOG_CSS_CLASSNAMES.listItem;
-        item.style.cssText = 'display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; margin: 4px 0; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 6px; transition: background 0.15s ease;';
+        item.style.cssText = 'display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; padding: 8px 9px; margin: 3px 0; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 5px; transition: background 0.15s ease; box-sizing: border-box;';
         item.onmouseover = function() { item.style.background = '#f3f4f6'; };
         item.onmouseout = function() { item.style.background = '#ffffff'; };
         const leftSection = document.createElement('div');
-        leftSection.style.cssText = 'display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;';
+        leftSection.style.cssText = 'display: flex; align-items: flex-start; gap: 8px; flex: 1 1 auto; min-width: 0;';
         if (index !== null && index !== undefined) {
             const indexBadge = document.createElement('span');
             indexBadge.textContent = index;
-            indexBadge.style.cssText = 'background: #f3f4f6; color: #6b7280; font-size: 11px; font-weight: 600; min-width: 24px; height: 24px; border-radius: 12px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;';
+            indexBadge.style.cssText = 'background: #f3f4f6; color: #6b7280; font-size: 10px; font-weight: 600; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex: 0 0 22px;';
             leftSection.appendChild(indexBadge);
         }
         const nameText = document.createElement('span');
         nameText.textContent = text;
-        nameText.style.cssText = 'color: #111827; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;';
+        nameText.style.cssText = 'color: #111827; font-size: 12px; line-height: 1.35; white-space: normal; overflow-wrap: anywhere; min-width: 0; flex: 1 1 auto;';
         leftSection.appendChild(nameText);
         item.appendChild(leftSection);
         if (statusText) {
@@ -1515,7 +1560,7 @@
             else if (statusType === 'found') { badgeColor = '#15803d'; badgeBg = '#dcfce7'; }
             else if (statusType === 'notfound') { badgeColor = '#dc2626'; badgeBg = '#fee2e2'; }
             else if (statusType === 'duplicate') { badgeColor = '#c2410c'; badgeBg = '#ffedd5'; }
-            statusBadge.style.cssText = 'color: ' + badgeColor + '; background: ' + badgeBg + '; font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 10px; white-space: nowrap; flex-shrink: 0;';
+            statusBadge.style.cssText = 'color: ' + badgeColor + '; background: ' + badgeBg + '; font-size: 10px; font-weight: 600; line-height: 1.25; padding: 4px 7px; border-radius: 9px; white-space: normal; overflow-wrap: anywhere; text-align: center; flex: 0 0 auto; max-width: 44%;';
             item.appendChild(statusBadge);
         }
         return item;
@@ -1523,48 +1568,329 @@
 
     function showCollectingDataPanel(featureId, featureName) {
         addLogMessage('showCollectingDataPanel: showing for ' + featureId, 'log');
-        var existing = document.getElementById(featureId + '-collecting-modal');
-        if (existing && existing.parentNode) {
-            existing.parentNode.removeChild(existing);
+        clearDockedStatusPanel();
+        var host = document.getElementById('florence-status-panel');
+        if (host) {
+            var spinnerStyle = document.getElementById('collecting-spinner-style');
+            if (!spinnerStyle) {
+                spinnerStyle = document.createElement('style');
+                spinnerStyle.id = 'collecting-spinner-style';
+                spinnerStyle.textContent = '@keyframes collectingSpin { to { transform: rotate(360deg); } }';
+                document.head.appendChild(spinnerStyle);
+            }
+            host.style.display = 'flex';
+            host.dataset.featureId = featureId;
+            host.dataset.startedAt = String(Date.now());
+            var status = document.createElement('div');
+            status.setAttribute('role', 'status');
+            status.setAttribute('aria-live', 'polite');
+            status.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px 12px;color:#374151;font-size:12px;';
+            var spinner = document.createElement('span');
+            spinner.style.cssText = 'width:15px;height:15px;border:2px solid #d1d5db;border-top-color:#2563eb;border-radius:50%;animation:collectingSpin 0.8s linear infinite;flex:0 0 auto;';
+            var title = document.createElement('span');
+            title.textContent = (featureName || 'Function') + ' - Collecting data';
+            status.appendChild(spinner);
+            status.appendChild(title);
+            host.appendChild(status);
         }
-        var modal = document.createElement('div');
-        modal.id = featureId + '-collecting-modal';
-        modal.style.cssText = 'position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.5); z-index: 20000; display: flex; align-items: center; justify-content: center;';
-        var container = document.createElement('div');
-        container.style.cssText = 'background: #ffffff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 36px 48px; max-width: 420px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15); text-align: center;';
-        container.setAttribute('role', 'dialog');
-        container.setAttribute('aria-modal', 'true');
-        container.setAttribute('aria-labelledby', featureId + '-collecting-title');
-        var spinner = document.createElement('div');
-        spinner.style.cssText = 'width: 48px; height: 48px; border: 4px solid #e5e7eb; border-top-color: #2563eb; border-radius: 50%; margin: 0 auto 20px; animation: collectingSpin 0.8s linear infinite;';
-        var styleTag = document.getElementById('collecting-spinner-style');
-        if (!styleTag) {
-            styleTag = document.createElement('style');
-            styleTag.id = 'collecting-spinner-style';
-            styleTag.textContent = '@keyframes collectingSpin { to { transform: rotate(360deg); } }';
-            document.head.appendChild(styleTag);
-        }
-        var title = document.createElement('h3');
-        title.id = featureId + '-collecting-title';
-        title.textContent = featureName || 'Please wait';
-        title.style.cssText = 'margin: 0 0 8px 0; color: #111827; font-size: 18px; font-weight: 600;';
-        var message = document.createElement('p');
-        message.textContent = 'Please wait. Collecting data.';
-        message.style.cssText = 'margin: 0; color: #6b7280; font-size: 15px; font-weight: 400;';
-        container.appendChild(spinner);
-        container.appendChild(title);
-        container.appendChild(message);
-        modal.appendChild(container);
-        document.body.appendChild(modal);
         addLogMessage('showCollectingDataPanel: displayed for ' + featureId, 'log');
     }
 
     function removeCollectingDataPanel(featureId) {
         addLogMessage('removeCollectingDataPanel: removing for ' + featureId, 'log');
-        var modal = document.getElementById(featureId + '-collecting-modal');
-        if (modal && modal.parentNode) {
-            modal.parentNode.removeChild(modal);
+        var host = document.getElementById('florence-status-panel');
+        if (host && host.dataset.featureId === featureId && host.querySelector('[role="status"]')) { clearDockedStatusPanel(); }
+    }
+
+    function clearDockedStatusPanel() {
+        var host = document.getElementById('florence-status-panel');
+        if (!host) { return; }
+        if (dockedStatusTimerId) { clearInterval(dockedStatusTimerId); dockedStatusTimerId = null; }
+        host.replaceChildren();
+        host.removeAttribute('data-feature-id');
+        host.removeAttribute('data-started-at');
+        host.removeAttribute('data-finished-at');
+        host.style.display = 'none';
+    }
+
+    var dockedStatusTimerId = null;
+
+    function mountDockedStatusPanel(config) {
+        var host = document.getElementById('florence-status-panel');
+        var modal = document.getElementById(config.modalId);
+        var container = modal && modal.querySelector('[id$="-progress-container"]');
+        if (!container) { container = modal && modal.firstElementChild; }
+        if (!host || !modal || !container) { return false; }
+        var startedAt = Number(host.dataset.startedAt) || Date.now();
+        clearDockedStatusPanel();
+        host.dataset.featureId = config.featureId;
+        host.dataset.startedAt = String(startedAt);
+        host.style.display = 'flex';
+        var statusHeight = Math.max(280, Math.min(420, Math.round((window.innerHeight || 700) * 0.52)));
+        host.style.flex = '0 0 ' + statusHeight + 'px';
+        host.style.height = statusHeight + 'px';
+        host.style.minHeight = '0';
+        host.style.maxHeight = statusHeight + 'px';
+        host.style.overflowY = 'auto';
+        host.style.overflowX = 'hidden';
+        host.style.scrollbarGutter = 'stable';
+        host.style.boxSizing = 'border-box';
+        host.style.paddingBottom = '4px';
+        host.setAttribute('aria-label', config.label || 'Function status');
+
+        var header = container.firstElementChild;
+        if (header) {
+            header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:8px 10px;border-bottom:1px solid #e5e7eb;flex:0 0 auto;cursor:default;';
+            var title = config.titleId && document.getElementById(config.titleId);
+            if (title) { title.style.cssText = 'margin:0;color:#111827;font-size:13px;font-weight:600;line-height:1.3;'; }
+            var actions = header.querySelectorAll('button');
+            for (var ai = 0; ai < actions.length; ai++) {
+                actions[ai].style.maxWidth = '100%';
+                actions[ai].style.padding = '4px 8px';
+                actions[ai].style.fontSize = '11px';
+                if (/close/i.test(actions[ai].getAttribute('aria-label') || '')) {
+                    actions[ai].addEventListener('click', clearDockedStatusPanel);
+                }
+            }
+            host.appendChild(header);
         }
+        (config.extraIds || []).forEach(function(id) {
+            var extra = container.querySelector('#' + id);
+            if (extra) { host.appendChild(extra); }
+        });
+        var statusList = config.listId && container.querySelector('#' + config.listId);
+        if (statusList) {
+            var isStandaloneList = statusList.id === 'resp-roles-list';
+            var statusPanel = isStandaloneList ? document.createElement('section') : statusList.parentElement;
+            if (statusPanel) {
+                var statusPanelHeight = Math.max(250, statusHeight - 75);
+                statusPanel.style.cssText = 'display:flex;flex:0 0 ' + statusPanelHeight + 'px;height:' + statusPanelHeight + 'px;min-height:0;max-height:' + statusPanelHeight + 'px;flex-direction:column;overflow:hidden;background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;margin:8px 8px 10px;padding:8px;gap:4px;box-sizing:border-box;';
+                var copyRow = document.createElement('div');
+                copyRow.style.cssText = 'display:flex;align-items:center;justify-content:flex-end;gap:6px;margin:0 0 4px;min-height:30px;flex:0 0 30px;';
+                var copyAll = document.createElement('button');
+                copyAll.type = 'button';
+                copyAll.textContent = 'Copy All';
+                copyAll.setAttribute('aria-label', 'Copy all status entries');
+                copyAll.style.cssText = 'background:#ffffff;border:1px solid #cbd5e1;color:#374151;padding:2px 10px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;flex-shrink:0;';
+                copyAll.onclick = function() { copyDockedStatusEntries(config.listId, copyAll); };
+                copyRow.appendChild(copyAll);
+                var sortButton = statusPanel.querySelector('button[aria-label="Toggle alphabetical sort"]');
+                if (!sortButton) {
+                    sortButton = document.createElement('button');
+                    sortButton.type = 'button';
+                    sortButton.textContent = 'A-Z';
+                    sortButton.setAttribute('aria-label', 'Toggle alphabetical sort');
+                    sortButton.setAttribute('aria-pressed', 'false');
+                    sortButton.style.cssText = 'background:#ffffff;border:1px solid #cbd5e1;color:#374151;padding:4px 9px;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;margin-right:6px;';
+                    sortButton.onclick = function() {
+                        var alphabetical = sortButton.getAttribute('aria-pressed') !== 'true';
+                        sortButton.setAttribute('aria-pressed', String(alphabetical));
+                        sortPanelListByName(config.listId, alphabetical);
+                    };
+                    copyRow.insertBefore(sortButton, copyAll);
+                }
+                var statusFilterButton = statusPanel.querySelector('button[aria-label="Filter by status"]');
+                var inlineActionRow = statusFilterButton && statusFilterButton.parentElement;
+                if (inlineActionRow) {
+                    inlineActionRow.style.display = 'flex';
+                    inlineActionRow.style.flexWrap = 'wrap';
+                    inlineActionRow.style.alignItems = 'center';
+                    inlineActionRow.style.gap = '6px';
+                    if (sortButton.parentElement !== inlineActionRow) { inlineActionRow.appendChild(sortButton); }
+                    inlineActionRow.appendChild(copyAll);
+                } else {
+                    copyRow.appendChild(copyAll);
+                }
+                var scrollViewport = document.createElement('div');
+                scrollViewport.setAttribute('data-florence-status-scroll', 'true');
+                scrollViewport.style.cssText = 'display:block;flex:1 1 auto;height:0;min-height:80px;max-height:none;overflow-y:auto;overflow-x:hidden;padding:0 4px 8px 0;scrollbar-gutter:stable;overscroll-behavior:contain;touch-action:pan-y;box-sizing:border-box;';
+                if (isStandaloneList) {
+                    var originalParent = statusList.parentElement;
+                    if (originalParent) { originalParent.replaceChild(statusPanel, statusList); }
+                    scrollViewport.appendChild(statusList);
+                    statusList.style.cssText = 'display:flex;flex-direction:column;gap:4px;flex:0 0 auto;height:auto;min-height:0;overflow:visible;box-sizing:border-box;';
+                } else {
+                    statusPanel.removeChild(statusList);
+                    scrollViewport.appendChild(statusList);
+                    statusList.style.cssText = 'display:flex;flex-direction:column;flex:0 0 auto;height:auto;min-height:0;max-height:none;overflow:visible;padding:0 0 8px;box-sizing:border-box;';
+                }
+                if (!inlineActionRow) { statusPanel.appendChild(copyRow); }
+                statusPanel.appendChild(scrollViewport);
+                host.appendChild(statusPanel);
+            }
+        }
+        var summary = config.summaryId && container.querySelector('#' + config.summaryId);
+        if (summary) {
+            var summaryColumns = Math.max(1, Math.min(6, summary.children.length));
+            summary.style.cssText = 'display:grid;grid-template-columns:repeat(' + summaryColumns + ',minmax(0,1fr));gap:4px;padding:6px;margin:0 8px 6px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:6px;flex:0 0 auto;';
+            Array.prototype.forEach.call(summary.children, function(item) {
+                item.style.cssText = 'text-align:center;min-width:0;';
+                var value = item.querySelector('span:first-child');
+                var label = item.querySelector('span:last-child');
+                if (value) { value.style.fontSize = '12px'; }
+                if (label) { label.style.fontSize = '8px'; label.style.lineHeight = '1.15'; }
+            });
+            host.appendChild(summary);
+        }
+        var timer = config.timerId && container.querySelector('#' + config.timerId);
+        if (timer) {
+            timer.style.cssText = 'display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:6px 8px;margin:0 8px 8px;background:#f1f5f9;border-radius:6px;flex:0 0 auto;';
+            Array.prototype.forEach.call(timer.children, function(item) {
+                item.style.textAlign = 'center';
+                var value = item.querySelector('span:first-child');
+                var label = item.querySelector('span:last-child');
+                if (value) { value.style.fontSize = '12px'; }
+                if (label) { label.style.fontSize = '9px'; }
+            });
+            host.appendChild(timer);
+        } else {
+            var compactTimer = document.createElement('div');
+            compactTimer.id = 'florence-status-time-summary';
+            compactTimer.style.cssText = 'display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;padding:6px 8px;margin:0 8px 8px;background:#f1f5f9;border-radius:6px;flex:0 0 auto;';
+            [['elapsed', 'Elapsed'], ['eta', 'ETA'], ['total', 'Estimated Total']].forEach(function(entry) {
+                var item = document.createElement('div');
+                item.style.cssText = 'text-align:center;';
+                var value = document.createElement('span');
+                value.id = 'florence-status-time-' + entry[0];
+                value.textContent = '--:--';
+                value.style.cssText = 'display:block;color:#111827;font-size:12px;font-weight:700;';
+                var label = document.createElement('span');
+                label.textContent = entry[1];
+                label.style.cssText = 'display:block;color:#64748b;font-size:9px;';
+                item.appendChild(value);
+                item.appendChild(label);
+                compactTimer.appendChild(item);
+            });
+            host.appendChild(compactTimer);
+            function updateDockTimer() {
+                var currentTime = Number(host.dataset.finishedAt) || Date.now();
+                var elapsedMs = Math.max(0, currentTime - startedAt);
+                var totalValue = 0;
+                var pendingValue = 0;
+                if (summary) {
+                    Array.prototype.forEach.call(summary.children, function(item) {
+                        var spans = item.querySelectorAll('span');
+                        if (spans.length < 2) { return; }
+                        var label = spans[1].textContent.trim().toLowerCase();
+                        var value = Number(String(spans[0].textContent).replace(/[^\d.-]/g, ''));
+                        if (label === 'total') { totalValue = value; }
+                        if (label === 'pending') { pendingValue = value; }
+                    });
+                }
+                var completed = Math.max(0, totalValue - pendingValue);
+                var estimatedTotal = completed > 0 && totalValue > 0 ? elapsedMs * totalValue / completed : -1;
+                var eta = estimatedTotal >= 0 ? Math.max(0, estimatedTotal - elapsedMs) : -1;
+                var doneText = ((host.querySelector('#' + (config.titleId || '')) || {}).textContent || '').toLowerCase();
+                doneText += ' ' + ((host.querySelector('#' + (config.badgeId || '')) || {}).textContent || '').toLowerCase();
+                if (!host.dataset.finishedAt && /complete|stopped/.test(doneText)) {
+                    host.dataset.finishedAt = String(Date.now());
+                    if (dockedStatusTimerId) { clearInterval(dockedStatusTimerId); dockedStatusTimerId = null; }
+                }
+                var elapsedEl = compactTimer.querySelector('#florence-status-time-elapsed');
+                var etaEl = compactTimer.querySelector('#florence-status-time-eta');
+                var totalEl = compactTimer.querySelector('#florence-status-time-total');
+                if (elapsedEl) { elapsedEl.textContent = formatDockedDuration(elapsedMs); }
+                if (etaEl) { etaEl.textContent = eta >= 0 ? formatDockedDuration(eta) : '--:--'; }
+                if (totalEl) { totalEl.textContent = estimatedTotal >= 0 ? formatDockedDuration(estimatedTotal) : '--:--'; }
+            }
+            updateDockTimer();
+            if (!host.dataset.finishedAt) { dockedStatusTimerId = setInterval(updateDockTimer, 1000); }
+        }
+        var live = config.liveId && container.querySelector('#' + config.liveId);
+        if (live) { host.appendChild(live); }
+        modal.remove();
+        return true;
+    }
+
+    function formatDockedDuration(milliseconds) {
+        var seconds = Math.floor(Math.max(0, milliseconds) / 1000);
+        var hours = Math.floor(seconds / 3600);
+        var minutes = Math.floor((seconds % 3600) / 60);
+        var remainder = seconds % 60;
+        return hours > 0 ? hours + ':' + String(minutes).padStart(2, '0') + ':' + String(remainder).padStart(2, '0') : String(minutes).padStart(2, '0') + ':' + String(remainder).padStart(2, '0');
+    }
+
+    function sortPanelListByName(listId, alphabetical) {
+        var list = document.getElementById(listId);
+        if (!list) { return; }
+        var rows = Array.prototype.slice.call(list.querySelectorAll('.' + ELOG_CSS_CLASSNAMES.listItem + ', .resp-role-item, .verify-result-item'));
+        rows.sort(function(a, b) {
+            if (alphabetical) {
+                var aName = a.getAttribute('data-sort-name') || a.textContent;
+                var bName = b.getAttribute('data-sort-name') || b.textContent;
+                return aName.trim().toLowerCase().localeCompare(bName.trim().toLowerCase());
+            }
+            return (Number(a.getAttribute('data-input-order')) || 0) - (Number(b.getAttribute('data-input-order')) || 0);
+        });
+        rows.forEach(function(row) { list.appendChild(row); });
+    }
+
+    function copyDockedStatusEntries(listId, button) {
+        var list = document.getElementById(listId);
+        if (!list) { return; }
+        var rows = list.querySelectorAll('.' + ELOG_CSS_CLASSNAMES.listItem + ', .resp-role-item, .verify-result-item');
+        var lines = [];
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            var originalEntry = row.getAttribute('data-entry-info');
+            if (originalEntry) {
+                lines.push(originalEntry);
+                continue;
+            }
+            var name = row.getAttribute('data-sort-name') || (row.classList.contains('resp-role-item') ? '' : row.getAttribute('data-role-key')) || '';
+            if (!name) {
+                var text = row.cloneNode(true);
+                var badges = text.querySelectorAll('.elog-status-badge, .resp-status-badge, [aria-live]');
+                for (var bi = 0; bi < badges.length; bi++) { badges[bi].remove(); }
+                name = text.textContent.replace(/\s+/g, ' ').trim();
+            }
+            var status = row.querySelector('.elog-status-badge, .resp-status-badge');
+            lines.push(name + (status && status.textContent.trim() ? '\t' + status.textContent.trim() : ''));
+        }
+        var copiedLabel = function() {
+            if (!button) { return; }
+            button.textContent = 'Copied';
+            setTimeout(function() { if (button.isConnected) { button.textContent = 'Copy All'; } }, 1400);
+        };
+        var textToCopy = lines.join('\n');
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(textToCopy).then(copiedLabel).catch(function() {
+                var textarea = document.createElement('textarea');
+                textarea.value = textToCopy;
+                textarea.style.cssText = 'position:fixed;left:-9999px;top:0;';
+                document.body.appendChild(textarea);
+                textarea.select();
+                try { document.execCommand('copy'); copiedLabel(); } finally { textarea.remove(); }
+            });
+            return;
+        }
+        var fallback = document.createElement('textarea');
+        fallback.value = textToCopy;
+        fallback.style.cssText = 'position:fixed;left:-9999px;top:0;';
+        document.body.appendChild(fallback);
+        fallback.select();
+        try { document.execCommand('copy'); copiedLabel(); } finally { fallback.remove(); }
+    }
+
+    function copyVerifyAllResults(button) {
+        var contents = verifyAllResults.map(function(result) {
+            return result.name + '\t' + result.status + (result.matchedName ? '\t' + result.matchedName : '');
+        }).join('\n');
+        var showCopied = function() {
+            button.textContent = 'Copied';
+            setTimeout(function() { if (button.isConnected) { button.textContent = 'Copy All'; } }, 1400);
+        };
+        var fallbackCopy = function() {
+            var textarea = document.createElement('textarea');
+            textarea.value = contents;
+            textarea.style.cssText = 'position:fixed;left:-9999px;top:0;';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try { document.execCommand('copy'); showCopied(); } finally { textarea.remove(); }
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(contents).then(showCopied).catch(fallbackCopy);
+        } else { fallbackCopy(); }
     }
 
     function populateELogLeftPanel() {
@@ -1780,6 +2106,7 @@
                 break;
             }
         }
+        applySubpanelListFilters(rightPanel);
     }
 
     function finalizeScan() {
@@ -1874,7 +2201,7 @@
 
     function showInlineNotice(message) {
         addLogMessage('showInlineNotice: ' + message, 'warn');
-        const container = document.getElementById('elog-progress-container');
+        const container = document.getElementById('elog-progress-container') || document.getElementById('florence-status-panel');
         if (!container) { return; }
         const existingNotice = container.querySelector('.elog-inline-notice');
         if (existingNotice) { existingNotice.remove(); }
@@ -4086,7 +4413,8 @@
     }
 
     function verifyClickDropdownAndWait(dropdownInput) {
-        var caretBtn = dropdownInput.closest('filtered-select').querySelector('button.test-caret, button.filtered-select__actions__btn');
+        var filteredSelect = dropdownInput && dropdownInput.closest ? dropdownInput.closest('filtered-select') : null;
+        var caretBtn = filteredSelect ? filteredSelect.querySelector('button.test-caret, button.filtered-select__actions__btn') : null;
         if (caretBtn) {
             var isExpanded = caretBtn.getAttribute('aria-expanded') === 'true';
             if (!isExpanded) {
@@ -4105,100 +4433,223 @@
     }
 
     function verifyScrollAndCollectNames() {
-        addLogMessage('verifyScrollAndCollectNames: looking for virtual scroll viewport', 'log');
-        var viewport = document.querySelector('filtered-select cdk-virtual-scroll-viewport, cdk-virtual-scroll-viewport');
-        if (!viewport) {
-            addLogMessage('verifyScrollAndCollectNames: viewport not found', 'error');
+        addLogMessage('verifyScrollAndCollectNames: locating the open member list', 'log');
+        var input = document.querySelector(ELOG_FORM_SELECTORS.memberInput);
+        var owner = input && input.closest ? input.closest('filtered-select') : null;
+        var listSelector = '.filtered-select__list__viewport, cdk-virtual-scroll-viewport, .cdk-virtual-scroll-viewport, ul.filtered-select__list, .filtered-select__list, [role="listbox"]';
+        var optionSelector = '.filtered-select__list__item, [role="option"], ul.filtered-select__list > li';
+        var startedAt = Date.now();
+        var waitLimitMs = 10000;
+
+        function isVisible(el) {
+            if (!el || !el.getBoundingClientRect) { return false; }
+            var rect = el.getBoundingClientRect();
+            if (!rect.width || !rect.height) { return false; }
+            var style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+        }
+
+        function getVisibleOptions(root) {
+            if (!root) { return []; }
+            var nodes = root.querySelectorAll(optionSelector);
+            var options = [];
+            for (var i = 0; i < nodes.length; i++) {
+                if (nodes[i].classList && (nodes[i].classList.contains('filtered-select__list__no-results') || nodes[i].getAttribute('aria-disabled') === 'true' && /no matching results/i.test(nodes[i].textContent || ''))) {
+                    continue;
+                }
+                options.push(nodes[i]);
+            }
+            return options;
+        }
+
+        function findListContainer() {
+            var candidates = [];
+            if (owner) {
+                var scoped = owner.querySelectorAll(listSelector);
+                for (var si = 0; si < scoped.length; si++) { candidates.push(scoped[si]); }
+            }
+            var global = document.querySelectorAll(listSelector);
+            for (var gi = 0; gi < global.length; gi++) {
+                if (candidates.indexOf(global[gi]) === -1) { candidates.push(global[gi]); }
+            }
+            var best = null;
+            var bestScore = -1;
+            for (var ci = 0; ci < candidates.length; ci++) {
+                var candidate = candidates[ci];
+                if (!isVisible(candidate)) { continue; }
+                var options = getVisibleOptions(candidate);
+                var hasScroll = candidate.scrollHeight > candidate.clientHeight + 2;
+                var score = (options.length ? 10 : 0) + (hasScroll ? 5 : 0);
+                if (candidate.matches('.filtered-select__list__viewport')) { score += 5; }
+                if (candidate.matches('cdk-virtual-scroll-viewport, .cdk-virtual-scroll-viewport')) { score += 3; }
+                if (candidate.matches('[role="listbox"]')) { score += 2; }
+                if (candidate.matches('ul.filtered-select__list, .filtered-select__list')) { score += 1; }
+                if (score > bestScore) { best = candidate; bestScore = score; }
+            }
+            return best;
+        }
+
+        function showCollectionError(message) {
+            addLogMessage('verifyScrollAndCollectNames: ' + message, 'error');
             removeCollectingDataPanel('verify');
             showVerifyThreePanelLayout();
             var leftPanel = document.getElementById('verify-threepanel-left');
-            if (leftPanel) {
-                leftPanel.querySelector('.verify-panel-body').innerHTML = '<div style="padding: 20px; color: #ff6b6b; text-align: center;">Dropdown list not found. Please try again.</div>';
+            var body = leftPanel && leftPanel.querySelector('.verify-panel-body');
+            if (body) {
+                body.innerHTML = '<div style="padding: 20px; color: #dc2626; text-align: center;"></div>';
+                body.firstChild.textContent = message;
             }
-            return;
         }
-        addLogMessage('verifyScrollAndCollectNames: viewport found, starting proper scroll collection', 'log');
-        var fullPassCount = 0;
-        var maxFullPasses = 3;
-        var passStartCount = verifyState.scannedNames.length;
-        var lastScrollTop = -1;
-        var stalledSteps = 0;
-        viewport.scrollTop = 0;
-        function collectVisibleNames() {
-            var items = viewport.querySelectorAll('li.filtered-select__list__item, li[role="option"]');
-            var currentTexts = [];
-            for (var i = 0; i < items.length; i++) {
-                var textSpan = items[i].querySelector('.filtered-select__list__item__text');
-                var nameText = textSpan ? textSpan.textContent.trim() : items[i].textContent.trim();
-                if (nameText) {
-                    currentTexts.push(nameText);
-                    var normalized = elogNormalizeName(nameText);
-                    if (!verifyState.seenNormalizedNames.has(normalized)) {
-                        verifyState.seenNormalizedNames.add(normalized);
-                        verifyState.scannedNames.push(nameText);
-                        addLogMessage('verifyScrollAndCollectNames: collected name "' + nameText + '"', 'log');
-                    }
-                }
+
+        function collectVisibleNames(listRoot) {
+            var options = getVisibleOptions(listRoot);
+            var added = 0;
+            for (var oi = 0; oi < options.length; oi++) {
+                var option = options[oi];
+                var textEl = option.querySelector('.filtered-select__list__item__text, [data-test*="name"], .u-text-overflow-ellipsis');
+                var nameText = option.getAttribute('aria-label') || (textEl && textEl.textContent) || option.textContent || '';
+                nameText = String(nameText).replace(/\s+/g, ' ').trim();
+                if (!nameText || /^(no matching results|no results|loading|searching)[.\s…]*$/i.test(nameText)) { continue; }
+                var normalized = elogNormalizeName(nameText);
+                if (!normalized || verifyState.seenNormalizedNames.has(normalized)) { continue; }
+                verifyState.seenNormalizedNames.add(normalized);
+                verifyState.scannedNames.push(nameText);
+                added++;
+                addLogMessage('verifyScrollAndCollectNames: collected name "' + nameText + '"', 'log');
             }
-            return currentTexts.join('|');
+            if (added) { updateVerifyAriaLiveRegion('Collected ' + verifyState.scannedNames.length + ' dropdown names'); }
+            return added;
         }
+
         function finishCollection(reason) {
             addLogMessage('verifyScrollAndCollectNames: scan complete (' + reason + ') - collected ' + verifyState.scannedNames.length + ' unique names', 'log');
             removeCollectingDataPanel('verify');
             showVerifyThreePanelLayout();
         }
-        function scrollStep() {
+
+        function waitForOptions() {
             if (!verifyState.isRunning) {
-                addLogMessage('verifyScrollAndCollectNames: stopped by user', 'warn');
                 removeCollectingDataPanel('verify');
                 showVerifyThreePanelLayout();
                 return;
             }
-            collectVisibleNames();
-            var curTop = viewport.scrollTop;
-            var maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
-            if (maxScroll <= 0) {
-                finishCollection('single visible page');
+            var listRoot = findListContainer();
+            var options = listRoot ? getVisibleOptions(listRoot) : [];
+            if (listRoot && options.length) {
+                startCollection(listRoot);
                 return;
             }
-            var step = Math.round(viewport.clientHeight * 0.8);
-            if (step < 50) step = 200;
-            var newTop = Math.min(curTop + step, maxScroll);
-            var atBottom = curTop >= maxScroll - 2 || newTop <= curTop;
-            if (atBottom) {
-                fullPassCount++;
-                var foundNewNamesThisPass = verifyState.scannedNames.length > passStartCount;
-                addLogMessage('verifyScrollAndCollectNames: completed pass ' + fullPassCount + ', names=' + verifyState.scannedNames.length + ', newThisPass=' + foundNewNamesThisPass, 'log');
-                if (fullPassCount >= 2 && !foundNewNamesThisPass) {
-                    finishCollection('verified no new names on confirmation pass');
-                    return;
-                }
-                if (fullPassCount >= maxFullPasses) {
-                    finishCollection('maximum confirmation passes reached');
-                    return;
-                }
-                passStartCount = verifyState.scannedNames.length;
-                viewport.scrollTop = 0;
-                lastScrollTop = -1;
-                stalledSteps = 0;
-                setTimeout(scrollStep, 180);
+            if (Date.now() - startedAt >= waitLimitMs) {
+                showCollectionError(listRoot ? 'The member dropdown opened, but it did not render any staff options.' : 'Could not find the open member list. Please reopen Verify Names and try again.');
                 return;
             }
-            if (Math.abs(newTop - lastScrollTop) < 2) {
-                stalledSteps++;
-            } else {
-                stalledSteps = 0;
-            }
-            if (stalledSteps >= 3) {
-                finishCollection('scroll stopped progressing');
-                return;
-            }
-            viewport.scrollTop = newTop;
-            lastScrollTop = newTop;
-            addLogMessage('verifyScrollAndCollectNames: scrolled to ' + newTop + ' (max=' + maxScroll + ', step=' + step + ', pass=' + (fullPassCount + 1) + ')', 'log');
-            setTimeout(scrollStep, 180);
+            var waitTid = setTimeout(waitForOptions, 250);
+            verifyState.timeouts.push(waitTid);
         }
-        setTimeout(scrollStep, 250);
+
+        function startCollection(listRoot) {
+            var scrollTarget = listRoot;
+            if (listRoot.matches && listRoot.matches('.filtered-select__list__viewport')) {
+                scrollTarget = listRoot;
+            }
+            var ancestor = listRoot.parentElement;
+            for (var depth = 0; !listRoot.matches('.filtered-select__list__viewport') && ancestor && ancestor !== document.body && depth < 6; depth++, ancestor = ancestor.parentElement) {
+                var ancestorStyle = window.getComputedStyle(ancestor);
+                var ancestorCanScroll = ancestor.scrollHeight > ancestor.clientHeight + 2 && /(auto|scroll|overlay)/.test(ancestorStyle.overflowY || '');
+                if (ancestorCanScroll) {
+                    scrollTarget = ancestor;
+                    break;
+                }
+                if (owner && ancestor === owner) { break; }
+            }
+            addLogMessage('verifyScrollAndCollectNames: list found; initial options=' + getVisibleOptions(listRoot).length + ' list=' + listRoot.tagName + ', scroll=' + scrollTarget.tagName + ' ' + scrollTarget.scrollHeight + '/' + scrollTarget.clientHeight, 'log');
+            var fullPassCount = 0;
+            var maxFullPasses = 2;
+            var consecutiveEmptyPasses = 0;
+            var passStartCount = verifyState.scannedNames.length;
+            var stalledSteps = 0;
+            var lastTop = -1;
+            scrollTarget.scrollTop = 0;
+
+            function waitForRenderedOptions(callback) {
+                var waitStartedAt = Date.now();
+                var lastSignature = '';
+                var stableSamples = 0;
+
+                function poll() {
+                    if (!verifyState.isRunning) {
+                        removeCollectingDataPanel('verify');
+                        showVerifyThreePanelLayout();
+                        return;
+                    }
+                    var options = getVisibleOptions(listRoot);
+                    var signature = scrollTarget.scrollHeight + ':' + scrollTarget.clientHeight + ':' +
+                        Array.prototype.map.call(options, function(option) {
+                            return String(option.getAttribute('aria-label') || option.textContent || '').replace(/\s+/g, ' ').trim();
+                        }).join('|');
+                    if (signature === lastSignature) { stableSamples++; }
+                    else { stableSamples = 0; lastSignature = signature; }
+                    if (Date.now() - waitStartedAt >= 250 && stableSamples >= 1) {
+                        collectVisibleNames(listRoot);
+                        callback();
+                        return;
+                    }
+                    if (Date.now() - waitStartedAt >= 1500) {
+                        collectVisibleNames(listRoot);
+                        callback();
+                        return;
+                    }
+                    var settleTid = setTimeout(poll, 100);
+                    verifyState.timeouts.push(settleTid);
+                }
+                poll();
+            }
+
+            function step() {
+                if (!verifyState.isRunning) {
+                    removeCollectingDataPanel('verify');
+                    showVerifyThreePanelLayout();
+                    return;
+                }
+                waitForRenderedOptions(function() {
+                    var maxScroll = Math.max(0, scrollTarget.scrollHeight - scrollTarget.clientHeight);
+                    var currentTop = scrollTarget.scrollTop;
+                    if (maxScroll <= 2 || currentTop >= maxScroll - 3) {
+                        fullPassCount++;
+                        var foundNew = verifyState.scannedNames.length > passStartCount;
+                        consecutiveEmptyPasses = foundNew ? 0 : consecutiveEmptyPasses + 1;
+                        addLogMessage('verifyScrollAndCollectNames: bottom pass=' + fullPassCount + ' unique=' + verifyState.scannedNames.length + ' new=' + foundNew + ' emptyPasses=' + consecutiveEmptyPasses, 'log');
+                        if (consecutiveEmptyPasses >= 1 || fullPassCount >= maxFullPasses) {
+                            finishCollection(fullPassCount >= maxFullPasses && consecutiveEmptyPasses < 2 ? 'safety pass limit reached' : 'confirmed no additional options');
+                            return;
+                        }
+                        passStartCount = verifyState.scannedNames.length;
+                        scrollTarget.scrollTop = 0;
+                        stalledSteps = 0;
+                        lastTop = -1;
+                        var restartTid = setTimeout(step, 150);
+                        verifyState.timeouts.push(restartTid);
+                        return;
+                    }
+                    var stepPx = Math.max(120, Math.round(scrollTarget.clientHeight * 0.7));
+                    var nextTop = Math.min(currentTop + stepPx, maxScroll);
+                    if (nextTop <= currentTop + 1 || Math.abs(nextTop - lastTop) < 2) { stalledSteps++; }
+                    else { stalledSteps = 0; }
+                    if (stalledSteps >= 6) {
+                        finishCollection('scroll position stopped changing after collecting visible options');
+                        return;
+                    }
+                    scrollTarget.scrollTop = nextTop;
+                    lastTop = nextTop;
+                    var scrollTid = setTimeout(step, 150);
+                    verifyState.timeouts.push(scrollTid);
+                });
+            }
+            var collectTid = setTimeout(step, 250);
+            verifyState.timeouts.push(collectTid);
+        }
+
+        waitForOptions();
     }
 
     function updateVerifyScanStatus(statusText, statusType) {
@@ -4223,7 +4674,7 @@
 
     function showVerifyInlineNotice(message) {
         addLogMessage('showVerifyInlineNotice: ' + message, 'warn');
-        const container = document.getElementById('verify-progress-container');
+        const container = document.getElementById('verify-progress-container') || document.getElementById('florence-status-panel');
         if (!container) { return; }
         const existingNotice = container.querySelector('.verify-inline-notice');
         if (existingNotice) { existingNotice.remove(); }
@@ -4276,6 +4727,8 @@
         var leftPanel = createVerifyPanelWithSearch('Collected Names (' + verifyState.scannedNames.length + ')', 'verify-threepanel-left');
         var middlePanel = createVerifyMiddlePanel();
         var rightPanel = createVerifyResultsPanel();
+        middlePanel.id = 'verify-threepanel-input-panel';
+        rightPanel.id = 'verify-threepanel-results-panel';
         content.appendChild(leftPanel);
         content.appendChild(middlePanel);
         content.appendChild(rightPanel);
@@ -4284,7 +4737,38 @@
         modal.appendChild(container);
         document.body.appendChild(modal);
         populateVerifyCollectedNames();
+        mountDockedVerifyResultsPanel();
         addLogMessage('showVerifyThreePanelLayout: 3-panel layout created', 'log');
+    }
+
+    function mountDockedVerifyResultsPanel() {
+        var host = document.getElementById('florence-status-panel');
+        var modal = document.getElementById('verify-threepanel-modal');
+        var container = modal && modal.firstElementChild;
+        if (!host || !container) { return; }
+        clearDockedStatusPanel();
+        host.style.display = 'flex';
+        host.dataset.featureId = 'verify';
+        var header = container.querySelector('#verify-threepanel-title');
+        header = header && header.parentElement && header.parentElement.parentElement;
+        var close = header && header.querySelector('button[aria-label="Close panel"]');
+        if (header) {
+            header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-bottom:1px solid #e5e7eb;';
+            var title = header.querySelector('#verify-threepanel-title');
+            if (title) { title.style.cssText = 'margin:0;color:#111827;font-size:13px;font-weight:600;'; }
+            if (close) { close.addEventListener('click', clearDockedStatusPanel); }
+            host.appendChild(header);
+        }
+        var inputPanel = container.querySelector('#verify-threepanel-input-panel');
+        var resultsPanel = container.querySelector('#verify-threepanel-results-panel');
+        [inputPanel, resultsPanel].forEach(function(panel) {
+            if (!panel) { return; }
+            panel.style.cssText = 'display:flex;flex-direction:column;min-height:0;max-height:30vh;overflow:hidden;background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;margin:8px;padding:8px;';
+            var scrollable = panel.querySelector('#verify-threepanel-input, #verify-threepanel-right');
+            if (scrollable) { scrollable.style.flex = '1 1 auto'; scrollable.style.minHeight = '50px'; scrollable.style.overflowY = 'auto'; }
+            host.appendChild(panel);
+        });
+        modal.remove();
     }
 
     function createVerifyPanelWithSearch(titleText, bodyId) {
@@ -4337,6 +4821,22 @@
         copyBtn.onmouseover = function() { copyBtn.style.background = '#dbeafe'; };
         copyBtn.onmouseout = function() { copyBtn.style.background = '#eff6ff'; };
         copyBtn.onclick = function() { copyVerifyFilteredResults(); };
+        var sortBtn = document.createElement('button');
+        sortBtn.textContent = 'A-Z';
+        sortBtn.setAttribute('aria-label', 'Toggle alphabetical sort');
+        sortBtn.setAttribute('aria-pressed', 'false');
+        sortBtn.style.cssText = 'background:#ffffff;border:1px solid #cbd5e1;color:#374151;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;';
+        sortBtn.onclick = function() {
+            var alphabetical = sortBtn.getAttribute('aria-pressed') !== 'true';
+            sortBtn.setAttribute('aria-pressed', String(alphabetical));
+            sortPanelListByName('verify-threepanel-right', alphabetical);
+        };
+        var copyAllBtn = document.createElement('button');
+        copyAllBtn.textContent = 'Copy All';
+        copyAllBtn.style.cssText = 'background:#ffffff;border:1px solid #cbd5e1;color:#374151;padding:4px 8px;border-radius:6px;cursor:pointer;font-size:11px;font-weight:600;';
+        copyAllBtn.onclick = function() { copyVerifyAllResults(copyAllBtn); };
+        buttonRow.appendChild(sortBtn);
+        buttonRow.appendChild(copyAllBtn);
         buttonRow.appendChild(filterBtn);
         buttonRow.appendChild(copyBtn);
         titleRow.appendChild(panelTitle);
@@ -4511,6 +5011,9 @@
             var item = document.createElement('div');
             item.className = 'verify-result-item';
             item.setAttribute('data-status', result.status);
+            item.setAttribute('data-sort-name', result.name);
+            item.setAttribute('data-input-order', String(i + 1));
+            item.setAttribute('data-entry-info', result.name + '\t' + result.status + (result.matchedName ? '\t' + result.matchedName : ''));
             item.style.cssText = 'padding: 10px 12px; background: #ffffff; border: 1px solid #e5e7eb; border-radius: 6px; margin-bottom: 6px; transition: all 0.15s ease;';
             item.onmouseover = function() { this.style.background = '#f3f4f6'; };
             item.onmouseout = function() { this.style.background = '#ffffff'; };
@@ -4932,11 +5435,11 @@
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
         document.body.appendChild(modal);
         initializeVerifyRightPanel();
         populateVerifyLeftPanel();
         finalizeVerifyRightPanelAfterScan();
+        mountDockedStatusPanel({ featureId: 'verify', modalId: 'verify-progress-modal', titleId: 'verify-progress-title', badgeId: 'verify-status-badge', listId: 'verify-right-panel', summaryId: 'verify-summary-footer', timerId: 'verify-timer-bar', liveId: 'verify-aria-live', label: 'Name verification status' });
         rescanButton.focus();
         addLogMessage('showVerifyProgressPanel: progress panel displayed with all data populated', 'log');
         updateVerifyScanStatus('Scan Complete', 'complete');
@@ -6319,6 +6822,8 @@
         var item = document.createElement('div');
         item.className = 'resp-role-item';
         item.setAttribute('data-role-key', roleData.key);
+    item.setAttribute('data-sort-name', roleData.displayRole || roleData.key || '');
+    item.setAttribute('data-input-order', String(index + 1));
         item.style.cssText = 'display: flex; flex-direction: column; padding: 10px 12px; margin: 4px 0; background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 6px; transition: background 0.15s ease;';
         item.onmouseover = function() {
             item.style.background = '#f3f4f6';
@@ -6519,9 +7024,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
     container.style.transform = 'translate(-50%, -50%)';
     modal.style.pointerEvents = 'none';
     container.style.pointerEvents = 'auto';
-    makeDraggable(container, header);
     document.body.appendChild(modal);
     closeButton.focus();
+    mountDockedStatusPanel({ featureId: 'responsibilities', modalId: 'resp-progress-modal', titleId: 'resp-progress-title', badgeId: 'resp-status-badge', listId: 'resp-roles-list', summaryId: 'resp-summary-footer', timerId: 'resp-timer-bar', liveId: 'resp-aria-live', extraIds: ['resp-progress-search'], label: 'Set Role Template status' });
     addLogMessage('showResponsibilitiesProgressPanel: displayed', 'log');
 }
 
@@ -8607,6 +9112,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         doaState.isAddingEntries = false;
         doaState.isPaused = false;
         doaState.activeDropdown = null;
+        doaState.preserveResponsibilities = false;
     }
 
     function doaSetAriaBusyOn() {
@@ -8874,6 +9380,61 @@ function showResponsibilitiesProgressPanel(rolesData) {
         return results;
     }
 
+    function parseDoANameRoleOnlyInput(rawText) {
+        var result = { candidates: [], errors: [] };
+        if (!rawText || !rawText.trim()) { return result; }
+        var lines = rawText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+        var seenPairKeys = new Set();
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            if (!line) { continue; }
+            var parts = line.split('\t');
+            if (parts.length !== 2) {
+                result.errors.push('Line ' + (i + 1) + ' must contain exactly two tab-separated columns: name and role.');
+                continue;
+            }
+            var namePart = parts[0].trim().replace(/^"|"$/g, '');
+            var rolePart = parts[1].trim().replace(/^"|"$/g, '');
+            if (!namePart || !rolePart) {
+                result.errors.push('Line ' + (i + 1) + ' must include both a staff name and role.');
+                continue;
+            }
+            if (/^(staff\s+)?name$/i.test(namePart) && /^(study\s+)?role$/i.test(rolePart)) { continue; }
+            var nameTokens = namePart.replace(/\s+/g, ' ').split(' ');
+            var normalizedDisplay = [];
+            for (var ti = 0; ti < nameTokens.length; ti++) {
+                if (nameTokens[ti]) { normalizedDisplay.push(nameTokens[ti].charAt(0).toUpperCase() + nameTokens[ti].slice(1).toLowerCase()); }
+            }
+            var displayName = normalizedDisplay.join(' ');
+            var roleNorm = normalizeRoleName(rolePart);
+            if (!roleNorm.key) {
+                result.errors.push('Line ' + (i + 1) + ' has a role that could not be interpreted.');
+                continue;
+            }
+            var pairKey = normalizeFirstLastPair(displayName);
+            if (!pairKey) {
+                result.errors.push('Line ' + (i + 1) + ' has a staff name that could not be interpreted.');
+                continue;
+            }
+            if (seenPairKeys.has(pairKey)) {
+                addLogMessage('parseDoANameRoleOnlyInput: duplicate name ignored: ' + displayName, 'log');
+                continue;
+            }
+            seenPairKeys.add(pairKey);
+            result.candidates.push({
+                display: displayName,
+                normalized: elogNormalizeName(displayName),
+                pairKey: pairKey,
+                roleDisplay: roleNorm.display,
+                roleKey: roleNorm.key,
+                numbersSet: new Set(),
+                preserveResponsibilities: true,
+                originalLine: displayName + '\t' + roleNorm.display
+            });
+        }
+        return result;
+    }
+
     function buildDoAQueueSorted(parsedCandidates) {
         addLogMessage('buildDoAQueueSorted: building from ' + parsedCandidates.length + ' candidates', 'log');
         var seenPairKeys = new Set();
@@ -8910,7 +9471,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 candidatePairKeys: doaCandidates.pairKeys,
                 roleDisplay: candidate.roleDisplay,
                 roleKey: candidate.roleKey,
-                numbersSet: candidate.numbersSet,
+                numbersSet: candidate.numbersSet || new Set(),
+                preserveResponsibilities: !!candidate.preserveResponsibilities,
+                startDate: candidate.startDate || null,
+                originalLine: candidate.originalLine || '',
                 status: DOA_LABELS.statusPending
             });
         }
@@ -8972,6 +9536,44 @@ function showResponsibilitiesProgressPanel(rolesData) {
             }
         }
         var textarea = document.createElement('textarea');
+        var startDateRow = document.createElement('div');
+        startDateRow.style.cssText = 'display: none; margin: 0 0 12px;';
+        var startDateLabel = document.createElement('label');
+        startDateLabel.textContent = 'Start Date';
+        startDateLabel.style.cssText = 'display: block; color: #374151; font-size: 13px; font-weight: 600; margin-bottom: 5px;';
+        var startDateInput = document.createElement('input');
+        startDateInput.type = 'text';
+        startDateInput.inputMode = 'text';
+        startDateInput.placeholder = '22Oct2026 (blank to skip)';
+        startDateInput.setAttribute('aria-label', 'Optional start date in DDMmmYYYY format');
+        startDateInput.value = formatDoADate(new Date());
+        startDateInput.style.cssText = 'width: 100%; height: 38px; padding: 8px 10px; border: 1px solid #d1d5db; border-radius: 8px; background: #ffffff; color: #111827; font-size: 13px; box-sizing: border-box;';
+        startDateRow.appendChild(startDateLabel);
+        startDateRow.appendChild(startDateInput);
+        var preserveModeRow = document.createElement('div');
+        preserveModeRow.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb;';
+        var preserveModeText = document.createElement('div');
+        var preserveModeTitle = document.createElement('div');
+        preserveModeTitle.textContent = 'Name and role only';
+        preserveModeTitle.style.cssText = 'color: #111827; font-size: 13px; font-weight: 600;';
+        var preserveModeHint = document.createElement('div');
+        preserveModeHint.textContent = 'Keep the responsibilities shown after role selection unchanged.';
+        preserveModeHint.style.cssText = 'color: #6b7280; font-size: 12px; margin-top: 2px; line-height: 1.35;';
+        preserveModeText.appendChild(preserveModeTitle);
+        preserveModeText.appendChild(preserveModeHint);
+        var preserveModeSwitch = document.createElement('button');
+        preserveModeSwitch.type = 'button';
+        preserveModeSwitch.setAttribute('role', 'switch');
+        preserveModeSwitch.setAttribute('aria-checked', 'false');
+        preserveModeSwitch.setAttribute('aria-label', 'Name and role only; keep responsibilities unchanged');
+        preserveModeSwitch.style.cssText = 'position: relative; width: 44px; height: 24px; border: 1px solid #cbd5e1; border-radius: 12px; background: #e2e8f0; padding: 0; cursor: pointer; flex: 0 0 auto;';
+        var preserveModeKnob = document.createElement('span');
+        preserveModeKnob.style.cssText = 'position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #ffffff; box-shadow: 0 1px 2px rgba(0,0,0,0.18); transition: transform 0.15s ease;';
+        preserveModeSwitch.appendChild(preserveModeKnob);
+        var nameRoleOnlyMode = false;
+        var validationMessage = document.createElement('div');
+        validationMessage.setAttribute('role', 'status');
+        validationMessage.style.cssText = 'display: none; color: #b91c1c; font-size: 12px; margin: -4px 0 10px;';
         textarea.id = 'doa-entries-input';
         textarea.placeholder = 'Paste tab-separated staff table here...\nExample:\nPETER WINKLE\tPW\tMD\tp.winkle@cenexel.com\tPrincipal Investigator\tPI\t1 to 8\t13\t14';
         textarea.setAttribute('aria-label', 'DoA staff entries input');
@@ -8986,9 +9588,38 @@ function showResponsibilitiesProgressPanel(rolesData) {
         confirmButton.textContent = 'Confirm';
         confirmButton.disabled = true;
         confirmButton.style.cssText = 'background: #22c55e; border: 1px solid #22c55e; color: #ffffff; padding: 10px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; font-weight: 600; letter-spacing: 0.2px; transition: all 0.15s ease; opacity: 0.5;';
+        var setPreserveModeVisual = function() {
+            preserveModeSwitch.setAttribute('aria-checked', String(nameRoleOnlyMode));
+            preserveModeSwitch.style.background = nameRoleOnlyMode ? '#15803d' : '#e2e8f0';
+            preserveModeSwitch.style.borderColor = nameRoleOnlyMode ? '#15803d' : '#cbd5e1';
+            preserveModeKnob.style.transform = nameRoleOnlyMode ? 'translateX(20px)' : 'translateX(0)';
+            startDateRow.style.display = nameRoleOnlyMode ? 'block' : 'none';
+            preserveModeHint.textContent = nameRoleOnlyMode ? 'Enter exactly two tab-separated columns per row: staff name and role. Responsibilities will not be edited.' : 'Keep the responsibilities shown after role selection unchanged.';
+            textarea.placeholder = nameRoleOnlyMode ? 'Name [TAB] Role\nExample:\nPETER WINKLE\tPrincipal Investigator' : 'Paste tab-separated staff table here...\nExample:\nPETER WINKLE\tPW\tMD\tp.winkle@cenexel.com\tPrincipal Investigator\tPI\t1 to 8\t13\t14';
+            textarea.setAttribute('aria-label', nameRoleOnlyMode ? 'Staff names and roles input' : 'DoA staff entries input');
+        };
         var updateConfirmState = function() {
-            var parsed = parseDoAEntriesInput(textarea.value);
-            if (parsed.length > 0) {
+            var isValid = false;
+            if (nameRoleOnlyMode) {
+                var nameRoleResult = parseDoANameRoleOnlyInput(textarea.value);
+                var parsedDate = parseDoAStartDate(startDateInput.value);
+                isValid = nameRoleResult.candidates.length > 0 && nameRoleResult.errors.length === 0 && parsedDate.valid;
+                if (nameRoleResult.errors.length) {
+                    validationMessage.textContent = nameRoleResult.errors[0];
+                    validationMessage.style.display = 'block';
+                } else if (!parsedDate.valid) {
+                    validationMessage.textContent = parsedDate.error;
+                    validationMessage.style.display = 'block';
+                } else {
+                    validationMessage.textContent = '';
+                    validationMessage.style.display = 'none';
+                }
+            } else {
+                isValid = parseDoAEntriesInput(textarea.value).length > 0;
+                validationMessage.textContent = '';
+                validationMessage.style.display = 'none';
+            }
+            if (isValid) {
                 confirmButton.disabled = false;
                 confirmButton.style.opacity = '1';
                 confirmButton.style.cursor = 'pointer';
@@ -8998,7 +9629,13 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 confirmButton.style.cursor = 'not-allowed';
             }
         };
+        preserveModeSwitch.onclick = function() {
+            nameRoleOnlyMode = !nameRoleOnlyMode;
+            setPreserveModeVisual();
+            updateConfirmState();
+        };
         textarea.oninput = updateConfirmState;
+        startDateInput.addEventListener('input', updateConfirmState);
         confirmButton.onmouseover = function() {
             if (!confirmButton.disabled) {
                 confirmButton.style.background = '#16a34a'; confirmButton.style.borderColor = '#16a34a';
@@ -9009,12 +9646,26 @@ function showResponsibilitiesProgressPanel(rolesData) {
         };
         confirmButton.onclick = function() {
             addLogMessage('showDoAInputPanel: Confirm clicked', 'log');
-            var parsed = parseDoAEntriesInput(textarea.value);
+            var parsed;
+            if (nameRoleOnlyMode) {
+                var nameRoleResult = parseDoANameRoleOnlyInput(textarea.value);
+                var parsedDate = parseDoAStartDate(startDateInput.value);
+                if (nameRoleResult.errors.length || !parsedDate.valid) {
+                    validationMessage.textContent = nameRoleResult.errors.length ? nameRoleResult.errors[0] : parsedDate.error;
+                    validationMessage.style.display = 'block';
+                    return;
+                }
+                parsed = nameRoleResult.candidates;
+                parsed.forEach(function(candidate) { candidate.startDate = parsedDate.date; });
+            } else {
+                parsed = parseDoAEntriesInput(textarea.value);
+            }
             if (parsed.length === 0) {
                 addLogMessage('showDoAInputPanel: no valid entries parsed', 'warn');
                 return;
             }
             doaState.parsedCandidates = parsed;
+            doaState.preserveResponsibilities = nameRoleOnlyMode;
             addLogMessage('showDoAInputPanel: parsed ' + parsed.length + ' candidates', 'log');
             if (modal.parentNode) {
                 document.body.removeChild(modal);
@@ -9038,9 +9689,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
             addLogMessage('showDoAInputPanel: Clear All clicked', 'log');
             textarea.value = '';
             doaState.parsedCandidates = [];
-            confirmButton.disabled = true;
-            confirmButton.style.opacity = '0.5';
-            confirmButton.style.cursor = 'not-allowed';
+            updateConfirmState();
         };
         var keyHandler = function(e) {
             if (e.key === 'Escape') {
@@ -9062,6 +9711,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
         buttonContainer.appendChild(confirmButton);
         container.appendChild(header);
         container.appendChild(description);
+        preserveModeRow.appendChild(preserveModeText);
+        preserveModeRow.appendChild(preserveModeSwitch);
+        container.appendChild(preserveModeRow);
+        container.appendChild(validationMessage);
+        container.appendChild(startDateRow);
         container.appendChild(textarea);
         container.appendChild(buttonContainer);
         modal.appendChild(container);
@@ -9087,11 +9741,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
         rightPanel.innerHTML = '';
         for (var i = 0; i < doaState.parsedCandidates.length; i++) {
             var candidate = doaState.parsedCandidates[i];
-            var numsArr = Array.from(candidate.numbersSet).sort(function(a, b) {
+            var numsArr = Array.from(candidate.numbersSet || []).sort(function(a, b) {
                 return a - b;
             });
-            var labelText = candidate.display + ' | ' + candidate.roleDisplay + ' | [' + numsArr.join(', ') + ']';
-            var item = createListItem(labelText, DOA_LABELS.statusPending, 'pending', i + 1);
+            var item = createListItem(candidate.display, DOA_LABELS.statusPending, 'pending', i + 1);
+            item.title = candidate.display + ' | ' + candidate.roleDisplay + (candidate.preserveResponsibilities ? ' | responsibilities unchanged' : ' | responsibilities: ' + numsArr.join(', ')) + (candidate.startDate ? ' | Start: ' + candidate.startDate.formatted : '');
             item.setAttribute('data-pairkey', candidate.pairKey);
             item.setAttribute('data-input-order', String(i + 1));
             item.setAttribute('data-sort-name', candidate.display);
@@ -9131,7 +9785,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     } else if (newStatus === DOA_LABELS.statusDuplicate) {
                         badgeColor = '#c2410c';
                         badgeBg = '#ffedd5';
-                    } else if (newStatus === DOA_LABELS.statusNotInDropdown || newStatus === DOA_LABELS.statusSelectionFailed || newStatus === DOA_LABELS.statusSaveFailed || newStatus === DOA_LABELS.statusRoleNotFound) {
+                    } else if (newStatus === DOA_LABELS.statusNotInDropdown || newStatus === DOA_LABELS.statusSelectionFailed || newStatus === DOA_LABELS.statusSaveFailed || newStatus === DOA_LABELS.statusRoleNotFound || newStatus === DOA_LABELS.statusResponsibilitiesChanged || newStatus === DOA_LABELS.statusPreserveCheckFailed) {
                         badgeColor = '#dc2626';
                         badgeBg = '#fee2e2';
                     } else if (newStatus === DOA_LABELS.statusTasksApplied) {
@@ -9150,6 +9804,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 break;
             }
         }
+        applySubpanelListFilters(rightPanel);
     }
 
     function updateDoARightPanelSummary(counters) {
@@ -9307,7 +9962,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         panelsContainer.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; overflow: hidden;';
         var leftPanel = createSubpanel('Scanned Log Entries', 'doa-left-panel', 'doa-left-search');
         var rightPanel = createSubpanel('DoA Entries Status', 'doa-right-panel', 'doa-right-search');
-        addSortToggleToSubpanel(rightPanel, 'doa-right-panel', 'doa-sort-toggle', 'doa-failure-filter', [DOA_LABELS.statusNotInDropdown, DOA_LABELS.statusRoleNotFound, DOA_LABELS.statusSelectionFailed, DOA_LABELS.statusSaveFailed]);
+        addSortToggleToSubpanel(rightPanel, 'doa-right-panel', 'doa-sort-toggle', 'doa-failure-filter', [DOA_LABELS.statusNotInDropdown, DOA_LABELS.statusRoleNotFound, DOA_LABELS.statusSelectionFailed, DOA_LABELS.statusSaveFailed, DOA_LABELS.statusResponsibilitiesChanged, DOA_LABELS.statusPreserveCheckFailed]);
         panelsContainer.appendChild(leftPanel);
         panelsContainer.appendChild(rightPanel);
         var summaryFooter = document.createElement('div');
@@ -9353,10 +10008,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
         document.body.appendChild(modal);
         initializeDoARightPanel();
         populateDoALeftPanel();
+        mountDockedStatusPanel({ featureId: 'doa', modalId: 'doa-progress-modal', titleId: 'doa-progress-title', badgeId: 'doa-status-badge', listId: 'doa-right-panel', summaryId: 'doa-summary-footer', timerId: 'doa-timer-bar', liveId: 'doa-aria-live', label: 'DoA staff-entry status' });
         closeButton.focus();
         addLogMessage('showDoAProgressPanel: progress panel displayed with all data populated', 'log');
         updateDoAScanStatus('Scan Complete', 'complete');
@@ -9996,25 +10651,24 @@ function showResponsibilitiesProgressPanel(rolesData) {
     }
 
     function clickDoASaveAndAddAnother() {
-        addLogMessage('clickDoASaveAndAddAnother: looking for Save button', 'log');
+        addLogMessage('clickDoASaveAndAddAnother: locating the Save & Add Another button in the entry form', 'log');
         return new Promise(function(resolve) {
-            var saveBtn = document.querySelector('button.btn.btn-primary.test-submitBtn');
-            if (!saveBtn) {
-                var buttons = document.querySelectorAll(DOA_SELECTORS.saveAndAddAnotherBtn);
-                for (var bi = 0; bi < buttons.length; bi++) {
-                    var btnText = buttons[bi].textContent.trim();
-                    if (btnText.indexOf('Save') !== -1) {
-                        saveBtn = buttons[bi];
-                        break;
-                    }
+            var form = document.querySelector('.log-entry-form');
+            var saveBtn = null;
+            var buttons = form ? form.querySelectorAll('button') : [];
+            for (var bi = 0; bi < buttons.length; bi++) {
+                var btnText = (buttons[bi].textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                if (btnText.indexOf('save') !== -1 && btnText.indexOf('add another') !== -1 && !buttons[bi].disabled) {
+                    saveBtn = buttons[bi];
+                    break;
                 }
             }
             if (!saveBtn) {
-                addLogMessage('clickDoASaveAndAddAnother: button not found', 'warn');
+                addLogMessage('clickDoASaveAndAddAnother: enabled Save & Add Another button not found in the entry form', 'warn');
                 resolve(false);
                 return;
             }
-            addLogMessage('clickDoASaveAndAddAnother: button found, clicking', 'log');
+            addLogMessage('clickDoASaveAndAddAnother: Save & Add Another found, clicking', 'log');
             saveBtn.click();
             var checkCount = 0;
             var maxChecks = Math.ceil(DOA_TIMEOUTS.waitAfterSaveMs / 200);
@@ -10149,6 +10803,73 @@ function showResponsibilitiesProgressPanel(rolesData) {
         });
     }
 
+    function doaRoleSelectionMatches(candidate) {
+        var roleInput = document.querySelector(DOA_SELECTORS.roleSearchInput);
+        if (!roleInput) { return false; }
+        if (normalizeRoleName(roleInput.value || '').key === candidate.roleKey) { return true; }
+        var owner = roleInput.closest ? roleInput.closest('.filtered-select') : null;
+        if (!owner) { owner = roleInput.parentElement; }
+        if (!owner) { return false; }
+        var selectedNodes = owner.querySelectorAll('[aria-selected="true"], [aria-checked="true"], [class*="selected"], [class*="selection"], [class*="value"], span, button');
+        for (var i = 0; i < selectedNodes.length; i++) {
+            var node = selectedNodes[i];
+            if (node === roleInput || (node.closest && node.closest('ul.filtered-select__list, .filtered-select__list, [role="listbox"], [role="option"]'))) { continue; }
+            if (normalizeRoleName(node.textContent || node.getAttribute('aria-label') || '').key === candidate.roleKey) { return true; }
+        }
+        return false;
+    }
+
+    function doaReadResponsibilityCheckboxSnapshot(menu) {
+        if (!menu) { return null; }
+        var items = menu.querySelectorAll(DOA_SELECTORS.tasksItem);
+        var taskStates = [];
+        for (var i = 0; i < items.length; i++) {
+            var text = String(items[i].textContent || '').trim();
+            var numberMatch = text.match(/^\s*(\d+)\./);
+            if (!numberMatch) { continue; }
+            var checkbox = items[i].querySelector(DOA_SELECTORS.tasksItemCheckbox);
+            if (!checkbox) { return null; }
+            taskStates.push({ number: parseInt(numberMatch[1], 10), checked: !!checkbox.checked });
+        }
+        if (!taskStates.length) { return null; }
+        taskStates.sort(function(a, b) { return a.number - b.number; });
+        var signature = taskStates.map(function(task) { return task.number + ':' + (task.checked ? '1' : '0'); }).join('|');
+        return { signature: signature, taskCount: taskStates.length };
+    }
+
+    function doaReadResponsibilitySnapshot() {
+        return new Promise(function(resolve) {
+            var toggle = document.querySelector(DOA_SELECTORS.tasksToggleBtn);
+            if (!toggle) { resolve(null); return; }
+            var menu = document.querySelector(DOA_SELECTORS.tasksMenu);
+            var wasVisible = !!(menu && menu.getClientRects().length && window.getComputedStyle(menu).display !== 'none' && window.getComputedStyle(menu).visibility !== 'hidden');
+            if (!wasVisible) { toggle.click(); }
+            var startedAt = Date.now();
+            function poll() {
+                var currentMenu = document.querySelector(DOA_SELECTORS.tasksMenu);
+                var visible = !!(currentMenu && currentMenu.getClientRects().length && window.getComputedStyle(currentMenu).display !== 'none' && window.getComputedStyle(currentMenu).visibility !== 'hidden');
+                if (visible) {
+                    var settleTid = setTimeout(function() {
+                        var settledMenu = document.querySelector(DOA_SELECTORS.tasksMenu);
+                        var snapshot = doaReadResponsibilityCheckboxSnapshot(settledMenu);
+                        if (settledMenu && settledMenu.getClientRects().length && window.getComputedStyle(settledMenu).display !== 'none') { toggle.click(); }
+                        resolve(snapshot);
+                    }, 150);
+                    doaState.timeouts.push(settleTid);
+                    return;
+                }
+                if (Date.now() - startedAt >= DOA_TIMEOUTS.waitTasksMenuMs) {
+                    if (currentMenu && currentMenu.getClientRects().length && window.getComputedStyle(currentMenu).display !== 'none') { toggle.click(); }
+                    resolve(null);
+                    return;
+                }
+                var pollTid = setTimeout(poll, 100);
+                doaState.timeouts.push(pollTid);
+            }
+            poll();
+        });
+    }
+
     function openAndApplyStudyTasks(numbersSet) {
         addLogMessage('openAndApplyStudyTasks: numbersSet size=' + numbersSet.size, 'log');
         return new Promise(function(resolve) {
@@ -10217,6 +10938,193 @@ function showResponsibilitiesProgressPanel(rolesData) {
                 addLogMessage('openAndApplyStudyTasks: timeout opening tasks menu: ' + err, 'error');
                 resolve(false);
             });
+        });
+    }
+
+    function formatDoADate(date) {
+        var months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        return String(date.getDate()).padStart(2, '0') + months[date.getMonth()] + date.getFullYear();
+    }
+
+    function parseDoAStartDate(value) {
+        var text = String(value || '').trim();
+        if (!text) { return { valid: true, date: null, error: '' }; }
+        var match = text.match(/^(\d{2})([A-Za-z]{3})(\d{4})$/);
+        var months = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+        if (!match) { return { valid: false, date: null, error: 'Start Date must use DDMmmYYYY format, for example 22Oct2026, or be blank.' }; }
+        var month = months.indexOf(match[2].toLowerCase());
+        var day = Number(match[1]);
+        var year = Number(match[3]);
+        if (month < 0 || year < 1000) { return { valid: false, date: null, error: 'Start Date is not a valid calendar date.' }; }
+        var date = new Date(year, month, day);
+        if (date.getFullYear() !== year || date.getMonth() !== month || date.getDate() !== day) {
+            return { valid: false, date: null, error: 'Start Date is not a valid calendar date.' };
+        }
+        return { valid: true, date: { year: year, month: month, day: day, formatted: formatDoADate(date) }, error: '' };
+    }
+
+    function doaSetStartDate(target) {
+        if (!target) { return Promise.resolve(true); }
+        var form = document.querySelector('.log-entry-form');
+        if (!form) { return Promise.resolve(false); }
+        var field = form.querySelector('input[readonly][placeholder="Start Date"], input.test-date-time-picker-3[placeholder*="Start Date"]');
+        if (!field || !field.isConnected) { return Promise.resolve(false); }
+        var previousActivePopup = startDateState.activeDatePopup;
+        var datePopup = null;
+        var fieldContainer = field.parentElement;
+        while (fieldContainer && form.contains(fieldContainer)) {
+            var localPopups = fieldContainer.querySelectorAll('date-time-popup');
+            if (localPopups.length === 1) {
+                datePopup = localPopups[0];
+                break;
+            }
+            fieldContainer = fieldContainer.parentElement;
+        }
+        if (!datePopup) {
+            addLogMessage('doaSetStartDate: could not uniquely associate Start Date input with its nearest date-time-popup', 'error');
+            return Promise.resolve(false);
+        }
+
+        // Reuse the same active-popup scoping and calendar controls as Add Start Date (DoA).
+        startDateState.activeDatePopup = datePopup;
+        var parent = datePopup.parentElement;
+        var siblingInputs = parent ? parent.querySelectorAll('input[placeholder]') : [];
+        var triggerInput = null;
+        for (var siblingIndex = 0; siblingIndex < siblingInputs.length; siblingIndex++) {
+            if (siblingInputs[siblingIndex] === field) { triggerInput = siblingInputs[siblingIndex]; break; }
+        }
+        if (!triggerInput) {
+            addLogMessage('doaSetStartDate: matched popup did not resolve to the Start Date input', 'error');
+            startDateState.activeDatePopup = previousActivePopup;
+            return Promise.resolve(false);
+        }
+        var popupAlreadyOpen = !!datePopup.querySelector('.test-datetime-popup.show, .test-datetime-popup.dropdown.show');
+        if (!popupAlreadyOpen) {
+            triggerInput.click();
+            triggerInput.focus();
+        }
+
+        function waitForPicker(attempt) {
+            var picker = getFreshPicker();
+            if (picker && picker.getClientRects().length > 0) { return Promise.resolve(picker); }
+            if (attempt >= 20) { return Promise.reject(new Error('Start Date calendar did not open in the matched popup')); }
+            return doaDelay(100).then(function() { return waitForPicker(attempt + 1); });
+        }
+        function restorePopup(result) {
+            startDateState.activeDatePopup = previousActivePopup;
+            return result;
+        }
+
+        return waitForPicker(0).then(function(picker) {
+            return adjustYearIfNeeded(picker, target.year).then(function(yearSelected) {
+                if (!yearSelected) { throw new Error('Could not select requested year ' + target.year); }
+                var freshPicker = getFreshPicker();
+                if (!freshPicker) { throw new Error('Calendar disappeared after year selection'); }
+                return selectMonth(freshPicker, target.month).then(function(monthSelected) {
+                    if (!monthSelected) { throw new Error('Could not select requested month'); }
+                    var currentPicker = getFreshPicker();
+                    if (!currentPicker) { throw new Error('Calendar disappeared before day selection'); }
+                    var dayCells = currentPicker.querySelectorAll(STARTDATE_SELECTORS.datepickerDayCell);
+                    var targetButton = null;
+                    for (var dayIndex = 0; dayIndex < dayCells.length; dayIndex++) {
+                        if (getStartDateDayButtonNumber(dayCells[dayIndex]) === target.day && !isStartDateDayButtonMuted(dayCells[dayIndex])) {
+                            targetButton = dayCells[dayIndex];
+                            break;
+                        }
+                    }
+                    if (!targetButton) { throw new Error('Requested day is not selectable in the verified calendar month'); }
+                    addLogMessage('doaSetStartDate: clicking exact day cell ' + target.day + ' in the form-scoped calendar', 'log');
+                    if (typeof targetButton.scrollIntoView === 'function') {
+                        targetButton.scrollIntoView({ block: 'center', inline: 'nearest' });
+                    }
+                    targetButton.focus();
+                    targetButton.click();
+                    return doaDelay(STARTDATE_TIMEOUTS.waitAfterDayClickMs).then(function() {
+                        var value = String(field.value || '').trim();
+                        var parsed = parseDateString(value);
+                        if (parsed && isDateEqualToTarget(parsed, { year: target.year, monthIndex0: target.month, day: target.day })) {
+                            return true;
+                        }
+                        var visiblePopup = datePopup.querySelector('.test-datetime-popup.show, .test-datetime-popup.dropdown.show');
+                        if (!visiblePopup || !visiblePopup.getClientRects().length) {
+                            throw new Error('Day click closed the matched calendar but the form field did not receive the requested date');
+                        }
+                        var retryPicker = datePopup.querySelector('datepicker, datepicker-inner, .test-date-picker, bs-datepicker-inline-container, .bs-datepicker');
+                        var retryCells = retryPicker ? retryPicker.querySelectorAll(STARTDATE_SELECTORS.datepickerDayCell) : [];
+                        var retryButton = null;
+                        for (var retryIndex = 0; retryIndex < retryCells.length; retryIndex++) {
+                            if (getStartDateDayButtonNumber(retryCells[retryIndex]) === target.day && !isStartDateDayButtonMuted(retryCells[retryIndex])) {
+                                retryButton = retryCells[retryIndex];
+                                break;
+                            }
+                        }
+                        if (!retryButton) { throw new Error('Matched calendar remained open but the requested day was no longer available'); }
+                        addLogMessage('doaSetStartDate: matched calendar stayed open with an empty field; retrying day ' + target.day + ' once', 'warn');
+                        retryButton.focus();
+                        retryButton.click();
+                        return doaDelay(STARTDATE_TIMEOUTS.waitAfterDayClickMs).then(function() {
+                            var retryValue = String(field.value || '').trim();
+                            var retryDate = parseDateString(retryValue);
+                            if (!retryDate || !isDateEqualToTarget(retryDate, { year: target.year, monthIndex0: target.month, day: target.day })) {
+                                throw new Error('Retry day click did not populate the requested Start Date (displayed: ' + retryValue + ')');
+                            }
+                            addLogMessage('doaSetStartDate: retry selected and verified Start Date as ' + retryValue, 'log');
+                            return true;
+                        });
+                    });
+                });
+            });
+        }).then(function(dayClicked) {
+            if (!dayClicked) { throw new Error('Could not interact with day ' + target.day + ' in the active calendar'); }
+            function readAndVerifyField() {
+                var currentValue = String(field.value || '').trim();
+                var parsed = parseDateString(currentValue);
+                var targetDate = { year: target.year, monthIndex0: target.month, day: target.day };
+                return { value: currentValue, valid: !!parsed && isDateEqualToTarget(parsed, targetDate) };
+            }
+            return doaDelay(STARTDATE_TIMEOUTS.waitAfterDayClickMs).then(function() {
+                var selected = readAndVerifyField();
+                if (selected.valid) {
+                    addLogMessage('doaSetStartDate: day click populated and verified Start Date as ' + selected.value, 'log');
+                    return true;
+                }
+                throw new Error('Selected Start Date did not match ' + target.formatted + ' (displayed: ' + selected.value + ')');
+            });
+        }).catch(function(error) {
+            addLogMessage('doaSetStartDate: ' + error.message, 'error');
+            return false;
+        }).then(restorePopup);
+    }
+
+    function doaPrepareResponsibilitiesForCandidate(candidate) {
+        if (!candidate.preserveResponsibilities) {
+            return doaDelay(DOA_TIMEOUTS.settleMs).then(function() {
+                return openAndApplyStudyTasks(candidate.numbersSet);
+            });
+        }
+        return doaDelay(DOA_TIMEOUTS.settleMs).then(function() {
+            if (!doaRoleSelectionMatches(candidate)) {
+                addLogMessage('doaPrepareResponsibilitiesForCandidate: selected role could not be verified for ' + candidate.display, 'error');
+                return false;
+            }
+            return doaReadResponsibilitySnapshot().then(function(snapshot) {
+                if (!snapshot) {
+                    addLogMessage('doaPrepareResponsibilitiesForCandidate: could not read responsibility defaults for ' + candidate.display, 'error');
+                    return false;
+                }
+                candidate.responsibilitySnapshot = snapshot.signature;
+                addLogMessage('doaPrepareResponsibilitiesForCandidate: captured ' + snapshot.taskCount + ' responsibility states for ' + candidate.display, 'log');
+                return true;
+            });
+        });
+    }
+
+    function doaVerifyCandidatePreservation(candidate) {
+        if (!candidate.preserveResponsibilities) { return Promise.resolve(true); }
+        if (!doaRoleSelectionMatches(candidate)) { return Promise.resolve('role-changed'); }
+        return doaReadResponsibilitySnapshot().then(function(snapshot) {
+            if (!snapshot) { return 'unavailable'; }
+            return snapshot.signature === candidate.responsibilitySnapshot ? true : 'responsibilities-changed';
         });
     }
 
@@ -10342,17 +11250,15 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     doaState.timeouts.push(tid3);
                     return;
                 }
-                addLogMessage('processNextDoAFromQueue: role selected, applying tasks', 'log');
+                addLogMessage(candidate.preserveResponsibilities ? 'processNextDoAFromQueue: role selected; preserving responsibilities' : 'processNextDoAFromQueue: role selected, applying tasks', 'log');
                 if (doaState.isPaused) { addLogMessage('processNextDoAFromQueue: paused before tasks', 'log'); return Promise.reject('__paused__'); }
-                return doaDelay(DOA_TIMEOUTS.settleMs).then(function() {
-                    return openAndApplyStudyTasks(candidate.numbersSet);
-                }).then(function(tasksApplied) {
-                    if (!tasksApplied) {
+                return doaPrepareResponsibilitiesForCandidate(candidate).then(function(tasksReady) {
+                    if (!tasksReady) {
                         addLogMessage('processNextDoAFromQueue: tasks failed', 'warn');
-                        candidate.status = DOA_LABELS.statusSelectionFailed;
+                        candidate.status = candidate.preserveResponsibilities ? DOA_LABELS.statusPreserveCheckFailed : DOA_LABELS.statusSelectionFailed;
                         doaState.counters.failures++;
                         doaState.counters.pending--;
-                        updateDoARightPanelStatus(candidate.pairKey, DOA_LABELS.statusSelectionFailed);
+                        updateDoARightPanelStatus(candidate.pairKey, candidate.status);
                         updateDoARightPanelSummary(doaState.counters);
                         if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
                         doaState.addQueueIndex++;
@@ -10360,9 +11266,37 @@ function showResponsibilitiesProgressPanel(rolesData) {
                         doaState.timeouts.push(tid4a);
                         return;
                     }
-                    addLogMessage('processNextDoAFromQueue: tasks applied, saving entry', 'log');
-                    if (doaState.isPaused) { addLogMessage('processNextDoAFromQueue: paused before save', 'log'); return Promise.reject('__paused__'); }
-                    return clickDoASaveAndAddAnother().then(function(saved) {
+                    return doaVerifyCandidatePreservation(candidate).then(function(preservationResult) {
+                        if (preservationResult !== true) {
+                            addLogMessage('processNextDoAFromQueue: preservation check failed (' + preservationResult + ') for ' + candidate.display + '; not saving', 'error');
+                            candidate.status = preservationResult === 'responsibilities-changed' ? DOA_LABELS.statusResponsibilitiesChanged : DOA_LABELS.statusPreserveCheckFailed;
+                            doaState.counters.failures++;
+                            doaState.counters.pending--;
+                            updateDoARightPanelStatus(candidate.pairKey, candidate.status);
+                            updateDoARightPanelSummary(doaState.counters);
+                            if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
+                            doaState.addQueueIndex++;
+                            var preservationFailTid = setTimeout(processNextDoAFromQueue, 50);
+                            doaState.timeouts.push(preservationFailTid);
+                            return;
+                        }
+                        addLogMessage(candidate.preserveResponsibilities ? 'processNextDoAFromQueue: role and responsibility state verified; saving entry' : 'processNextDoAFromQueue: tasks applied, saving entry', 'log');
+                        if (doaState.isPaused) { addLogMessage('processNextDoAFromQueue: paused before save', 'log'); return Promise.reject('__paused__'); }
+                        return doaSetStartDate(candidate.startDate).then(function(startDateSet) {
+                        if (!startDateSet) {
+                            addLogMessage('processNextDoAFromQueue: Start Date selection or verification failed for ' + candidate.display + '; entry not saved', 'error');
+                            candidate.status = DOA_LABELS.statusSelectionFailed;
+                            doaState.counters.failures++;
+                            doaState.counters.pending--;
+                            updateDoARightPanelStatus(candidate.pairKey, candidate.status);
+                            updateDoARightPanelSummary(doaState.counters);
+                            if (doaState.timer) { doaState.timer.updateProgress(doaState.counters.total - doaState.counters.pending); }
+                            doaState.addQueueIndex++;
+                            var dateFailTid = setTimeout(processNextDoAFromQueue, 50);
+                            doaState.timeouts.push(dateFailTid);
+                            return;
+                        }
+                        return clickDoASaveAndAddAnother().then(function(saved) {
                         if (!saved) {
                             addLogMessage('processNextDoAFromQueue: save acknowledgement timed out; not retrying to avoid a duplicate', 'warn');
                             candidate.status = DOA_LABELS.statusSaveFailed;
@@ -10408,6 +11342,8 @@ function showResponsibilitiesProgressPanel(rolesData) {
                             doaState.addQueueIndex++;
                             var failedVerifyTid = setTimeout(processNextDoAFromQueue, 50);
                             doaState.timeouts.push(failedVerifyTid);
+                        });
+                        });
                         });
                     });
                 });
@@ -11284,6 +12220,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         panelsContainer.style.cssText = 'display: grid; grid-template-columns: 1fr 1fr; gap: 16px; flex: 1; min-height: 0; overflow: hidden;';
         var leftPanel = createSubpanel('Scanned Log Entries', 'cb-select-left-panel', 'cb-select-left-search');
         var rightPanel = createSubpanel('Checkbox Selection Status', 'cb-select-right-panel', 'cb-select-right-search');
+        addSortToggleToSubpanel(rightPanel, 'cb-select-right-panel', 'cb-select-sort-toggle', 'cb-select-failure-filter', [CB_SELECT_LABELS.statusFailed, CB_SELECT_LABELS.statusNotInTable, CB_SELECT_LABELS.statusStopped]);
         panelsContainer.appendChild(leftPanel);
         panelsContainer.appendChild(rightPanel);
         var summaryFooter = document.createElement('div');
@@ -11331,9 +12268,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
         document.body.appendChild(modal);
         closeButton.focus();
+        mountDockedStatusPanel({ featureId: 'checkbox-select', modalId: 'cb-select-progress-modal', titleId: 'cb-select-progress-title', badgeId: 'cb-select-status-badge', listId: 'cb-select-right-panel', summaryId: 'cb-select-summary-footer', extraIds: ['cb-select-processing-strip'], liveId: 'cb-select-aria-live', label: 'Checkbox selection status' });
         addLogMessage('openCheckboxSelectProgressPanel: displayed', 'log');
     }
 
@@ -12000,6 +12937,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                     var item = createListItem(nameObj.display, CB_SELECT_LABELS.statusPending, 'pending', ni + 1);
                     item.setAttribute('data-pairkey', nameObj.pairKey);
                     item.setAttribute('data-cb-rowkey', nameObj.pairKey);
+                    item.setAttribute('data-sort-name', nameObj.display);
                     rightPanel.appendChild(item);
                 }
             }
@@ -12132,6 +13070,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
                         var tItem = createListItem(targets[ti].display, CB_SELECT_LABELS.statusPending, 'pending', ti + 1);
                         tItem.setAttribute('data-pairkey', targets[ti].pairKey);
                         tItem.setAttribute('data-cb-rowkey', targets[ti].rowKey || targets[ti].pairKey);
+                        tItem.setAttribute('data-sort-name', targets[ti].display);
                         rPanel.appendChild(tItem);
                     }
                 }
@@ -13071,9 +14010,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
         document.body.appendChild(modal);
         closeButton.focus();
+        mountDockedStatusPanel({ featureId: 'ssig', modalId: 'ssig-progress-modal', titleId: 'ssig-progress-title', badgeId: 'ssig-status-badge', listId: 'ssig-right-panel', summaryId: 'ssig-summary-footer', liveId: 'ssig-aria-live', label: 'Signature checkbox status' });
         addLogMessage('showSelectSignedCheckboxProgressPanel: displayed', 'log');
     }
 
@@ -16683,6 +17622,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         header.appendChild(titleContainer);
         header.appendChild(closeButton);
         var dateInfoBar = document.createElement('div');
+        dateInfoBar.id = 'startdate-date-info';
         dateInfoBar.style.cssText = 'margin-bottom: 12px; padding: 8px 12px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; flex-shrink: 0;';
         var dateInfoText = document.createElement('span');
         dateInfoText.style.cssText = 'color: #1e40af; font-size: 13px;';
@@ -16759,10 +17699,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
         container.style.transform = 'translate(-50%, -50%)';
         modal.style.pointerEvents = 'none';
         container.style.pointerEvents = 'auto';
-        makeDraggable(container, header);
         document.body.appendChild(modal);
         populateStartDateLeftPanel();
         initializeStartDateRightPanel();
+        mountDockedStatusPanel({ featureId: 'startdate', modalId: 'startdate-progress-modal', titleId: 'startdate-progress-title', badgeId: 'startdate-status-badge', listId: 'startdate-right-panel', summaryId: 'startdate-summary-footer', timerId: 'startdate-timer-bar', liveId: 'startdate-aria-live', extraIds: ['startdate-date-info'], label: 'DoA date update status' });
         closeButton.focus();
         addLogMessage('showStartDateProgressPanel: displayed', 'log');
         beginSetStartDatesForQueue();
@@ -17221,8 +18161,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
 
     function getFreshPicker() {
         var picker = null;
-        if (startDateState.activeDatePopup && startDateState.activeDatePopup.isConnected) {
-            picker = startDateState.activeDatePopup.querySelector('datepicker, datepicker-inner, .test-date-picker, bs-datepicker-inline-container, .bs-datepicker');
+        if (startDateState.activeDatePopup) {
+            if (startDateState.activeDatePopup.isConnected) {
+                picker = startDateState.activeDatePopup.querySelector('datepicker, datepicker-inner, .test-date-picker, bs-datepicker-inline-container, .bs-datepicker');
+            }
+            return picker;
         }
         if (!picker) {
             picker = document.querySelector('datepicker');
@@ -18889,8 +19832,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (updateRoleState.timer) { container.appendChild(updateRoleState.timer.createDisplay()); updateRoleState.timer.setTotal(nonDuplicateCount); }
         container.appendChild(ariaLiveRegion); modal.appendChild(container);
         container.style.position = 'fixed'; container.style.top = '50%'; container.style.left = '50%'; container.style.transform = 'translate(-50%, -50%)';
-        modal.style.pointerEvents = 'none'; container.style.pointerEvents = 'auto'; makeDraggable(container, header); document.body.appendChild(modal);
-        populateUpdateRoleLeftPanel(); initializeUpdateRoleRightPanel(); closeButton.focus();
+        modal.style.pointerEvents = 'none'; container.style.pointerEvents = 'auto'; document.body.appendChild(modal);
+        populateUpdateRoleLeftPanel(); initializeUpdateRoleRightPanel();
+        mountDockedStatusPanel({ featureId: 'update-role', modalId: 'updaterole-progress-modal', titleId: 'updaterole-progress-title', badgeId: 'updaterole-status-badge', listId: 'updaterole-right-panel', summaryId: 'updaterole-summary-footer', timerId: 'updaterole-timer-bar', liveId: 'updaterole-aria-live', label: 'Update Role status' });
+        closeButton.focus();
         beginUpdateRoleQueue();
     }
 
@@ -19574,8 +20519,10 @@ function showResponsibilitiesProgressPanel(rolesData) {
         if (updateDoaState.timer) { container.appendChild(updateDoaState.timer.createDisplay()); updateDoaState.timer.setTotal(nonDuplicateCount); }
         container.appendChild(ariaLiveRegion); modal.appendChild(container);
         container.style.position = 'fixed'; container.style.top = '50%'; container.style.left = '50%'; container.style.transform = 'translate(-50%, -50%)';
-        modal.style.pointerEvents = 'none'; container.style.pointerEvents = 'auto'; makeDraggable(container, header); document.body.appendChild(modal);
-        populateUpdateDoaLeftPanel(); initializeUpdateDoaRightPanel(); closeButton.focus();
+        modal.style.pointerEvents = 'none'; container.style.pointerEvents = 'auto'; document.body.appendChild(modal);
+        populateUpdateDoaLeftPanel(); initializeUpdateDoaRightPanel();
+        mountDockedStatusPanel({ featureId: 'update-doa', modalId: 'updatedoa-progress-modal', titleId: 'updatedoa-progress-title', badgeId: 'updatedoa-status-badge', listId: 'updatedoa-right-panel', summaryId: 'updatedoa-summary-footer', timerId: 'updatedoa-timer-bar', liveId: 'updatedoa-aria-live', label: 'Update DoA status' });
+        closeButton.focus();
         beginUpdateDoaQueue();
     }
 
@@ -25237,6 +26184,11 @@ function showResponsibilitiesProgressPanel(rolesData) {
         const trainingLogView = createTrainingLogView();
         tabContent.appendChild(trainingLogView);
 
+        const statusPanel = document.createElement('section');
+        statusPanel.id = 'florence-status-panel';
+        statusPanel.setAttribute('aria-live', 'polite');
+        statusPanel.style.cssText = 'display:none;flex:0 1 30%;min-height:0;max-height:36%;overflow-y:auto;overflow-x:hidden;flex-direction:column;background:#ffffff;border-top:1px solid #d1d5db;border-bottom:1px solid #e5e7eb;';
+
         const clearLogsBtn = document.createElement('button');
         clearLogsBtn.id = 'florence-clear-logs-btn';
         clearLogsBtn.textContent = 'Clear Logs';
@@ -25317,8 +26269,9 @@ function showResponsibilitiesProgressPanel(rolesData) {
         font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
         font-size: 11px;
         line-height: 1.5;
-        flex: 1 1 auto;
-        min-height: 120px;
+        flex: 1 1 0;
+        min-height: 96px;
+        max-height: 28vh;
         resize: vertical;
         box-sizing: border-box;
         color: #374151;
@@ -25332,6 +26285,7 @@ function showResponsibilitiesProgressPanel(rolesData) {
         guiContainer.appendChild(storageErrorBanner);
         guiContainer.appendChild(tabBar);
         guiContainer.appendChild(tabContent);
+        guiContainer.appendChild(statusPanel);
         guiContainer.appendChild(buttonsContainerDiv);
         guiContainer.appendChild(logBox);
 
